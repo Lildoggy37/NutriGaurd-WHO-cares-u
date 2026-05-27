@@ -8,4 +8,5 @@ __pycache__/
 2.langchain/
 3.RAG/
 4.milvus/
-5.langgraph/
+5.langgraph
+NutriGuard/data/
