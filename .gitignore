@@ -10,3 +10,4 @@ __pycache__/
 4.milvus/
 5.langgraph
 NutriGuard/data/
+NutriGuard/models/

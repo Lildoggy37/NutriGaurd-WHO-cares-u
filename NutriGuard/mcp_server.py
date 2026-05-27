@@ -1,9 +1,127 @@
 import sys
+import json
+import time
+import os
+import numpy as np
+import redis
+from redis.commands.search.field import TextField, VectorField
+from redis.commands.search.index_definition import IndexDefinition, IndexType
+from redis.commands.search.query import Query
+
 from fastmcp import FastMCP
+from langchain_huggingface import HuggingFaceEmbeddings
 # ============================
-#   统一工具网关FastMCP
+#   1. 构建MCP Redis  本地向量模型
 # ============================
 mcp = FastMCP("NutriGuard_Tools")
+# 链接本地的Docker 与 Redis Stack
+try:
+    redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    redis_client.ping()
+    print("✓ [MCP Server] Redis 连接成功", file=sys.stderr)
+except Exception as e:
+    print(f"⚠ [MCP Server] Redis 未连接，缓存功能将禁用: {e}", file=sys.stderr)
+    redis_client = None
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BGE_MODEL_PATH = os.path.join(BASE_DIR, "models", "bge-large-zh-v1.5")
+
+# 加载BGE模型，来Cache计算向量
+embedder = None
+VECTOR_DIM = 1024  # bge-large-zh-v1.5 的维度是 1024
+
+try:
+    if os.path.isdir(BGE_MODEL_PATH):
+        embedder = HuggingFaceEmbeddings(model_name=BGE_MODEL_PATH)
+        print("✓ [MCP Server] BGE 模型加载成功", file=sys.stderr)
+    else:
+        print(f"⚠ [MCP Server] BGE 模型路径不存在: {BGE_MODEL_PATH}", file=sys.stderr)
+        print(f"  请下载模型到该路径或修改 BGE_MODEL_PATH", file=sys.stderr)
+except Exception as e:
+    print(f"⚠ [MCP Server] BGE 模型加载失败: {e}", file=sys.stderr)
+
+
+# ============================
+#   2. Redis 语义缓存
+# ============================
+INDEX_NAME = "idx:semantic_cache"
+
+def setup_redis_index():
+    """
+    在Redis 创建向量索引 if not exist
+    """
+    if redis_client is None:
+        return
+    try:
+        redis_client.ft(INDEX_NAME).info()
+    except Exception:
+        try:
+            print("🧱 正在 Redis 中初始化 Vector Index...", file=sys.stderr)
+            schema = (
+                TextField("query_text"),
+                TextField("answer"),
+                VectorField("query_vector", "FLAT", {
+                    "TYPE": "FLOAT32",
+                    "DIM": VECTOR_DIM,
+                    "DISTANCE_METRIC": "COSINE"
+                })
+            )
+            definition = IndexDefinition(prefix=["cache:"], index_type=IndexType.HASH)
+            redis_client.ft(INDEX_NAME).create_index(fields=schema, definition=definition)
+        except Exception as e:
+            print(f"⚠ [MCP Server] Redis 索引初始化失败（可能需要 Redis Stack 而非普通 Redis）: {e}", file=sys.stderr)
+
+setup_redis_index()
+
+def get_from_cache(query: str, threshold: float = 0.85):
+    """
+    从Redis查询语义缓存（需要 embedder + redis_client 均可用）
+    """
+    if embedder is None or redis_client is None:
+        return None
+    try:
+        query_vector = embedder.embed_query(query)
+        query_vector_bytes = np.array(query_vector, dtype=np.float32).tobytes()
+
+        q = Query(f"*=>[KNN 1 @query_vector $vec AS score]")\
+            .return_fields("query_text", "answer", "score")\
+            .sort_by("score")\
+            .dialect(2)
+
+        results = redis_client.ft(INDEX_NAME).search(q, query_params={"vec": query_vector_bytes})
+
+        if results.docs:
+            distance = float(results.docs[0].score)
+            similarity = 1 - distance
+
+            if similarity >= threshold:
+                print(f"[Cache 命中] 相似度: {similarity:.4f} | 匹配历史提问: '{results.docs[0].query_text}'", file=sys.stderr)
+                return results.docs[0].answer
+    except Exception as e:
+        print(f"⚠ [Cache 查询异常] {e}", file=sys.stderr)
+
+    return None
+
+def save_to_cache(query: str, answer: str):
+    """
+    将新问题和答案写入 Redis 缓存，24h过期（需要 embedder + redis_client 均可用）
+    """
+    if embedder is None or redis_client is None:
+        return
+    try:
+        query_vector = embedder.embed_query(query)
+        query_vector_bytes = np.array(query_vector, dtype=np.float32).tobytes()
+
+        cache_key = f"cache:{hash(query)}"
+        redis_client.hset(cache_key, mapping={
+            "query_text": query,
+            "answer": answer,
+            "query_vector": query_vector_bytes
+        })
+        redis_client.expire(cache_key, 86400)
+    except Exception as e:
+        print(f"⚠ [Cache 写入异常] {e}", file=sys.stderr)
+
 
 # ============================
 #   class1  知识检索类 read-only
@@ -30,10 +148,31 @@ async def check_food_gi(food_name: str) -> str:
 @mcp.tool()
 async def search_medical_taboos(disease_name: str) -> str:
     """
-    查询特定慢性病（如糖尿病、痛风）的饮食禁忌和雷区。
+    查询特定慢性病（如糖尿病、痛风）的饮食禁忌。
     """
-    print(f" [MCP 检索] 正在查阅病理禁忌库: {disease_name}", file=sys.stderr)
-    return f"【模拟检索结果】{disease_name} 患者应当避免高嘌呤/高糖饮食，具体取决于病理分期。"
+    
+    # 先查 Redis 语义缓存
+    start_time = time.time()
+    cached_result = get_from_cache(disease_name, threshold=0.85)
+    
+    if cached_result:
+        latency = (time.time() - start_time) * 1000
+        print(f"⚡ [Redis 极速返回] 耗时: {latency:.2f} ms", file=sys.stderr)
+        return cached_result
+
+    # 未命中缓存，执行真实的重度检索（模拟休眠 2 秒代表去查 Qdrant 和 Reranker）
+    print(f"[Cache 未命中] 正在执行深度 RAG 检索: {disease_name}...", file=sys.stderr)
+    time.sleep(2) # 模拟耗时操作
+    
+    # 生成结果
+    real_answer = f"【深度检索结果】{disease_name} 患者应当严格控制嘌呤和游离糖的摄入，遵循临床营养指南。"
+    
+    # 异步写入缓存（为后续相同的提问铺路）
+    save_to_cache(disease_name, real_answer)
+    
+    latency = (time.time() - start_time) * 1000
+    print(f"[真实计算返回] 耗时: {latency:.2f} ms", file=sys.stderr)
+    return real_answer
 
 
 # ============================
@@ -51,13 +190,17 @@ async def log_user_meal(user_id: str, meal_type: str, food_items: str) -> str:
 
 @mcp.tool()
 async def calculate_daily_calories(user_id: str) -> str:
-    """计算用户今天已记录的总热量摄入和剩余配额。"""
+    """
+    计算用户今天已记录的总热量摄入和剩余配额。
+    """
     print(f" [MCP 行动] 正在核算今日卡路里 | 用户:{user_id}", file=sys.stderr)
     return f"用户 {user_id} 今日已摄入 1250 kcal，建议剩余摄入 550 kcal。"
 
 @mcp.tool()
 async def generate_shopping_list(ingredients: str) -> str:
-    """根据食谱生成结构化的超市采购清单。"""
+    """
+    根据食谱生成结构化的超市采购清单。
+    """
     print(f" [MCP 行动] 正在生成采购清单: {ingredients}", file=sys.stderr)
     return f"【生成成功】采购清单：{ingredients} (已按生鲜、干货分类)。"
 
