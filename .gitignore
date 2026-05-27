@@ -2,3 +2,10 @@
 .env
 __pycache__/
 *.pyc
+.claude/
+.vscode/
+1.test/
+2.langchain/
+3.RAG/
+4.milvus/
+5.langgraph/
