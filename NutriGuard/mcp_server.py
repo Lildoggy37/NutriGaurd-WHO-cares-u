@@ -8,8 +8,6 @@ from redis.commands.search.field import TextField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-
 from fastmcp import FastMCP
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter
@@ -65,46 +63,61 @@ headers_to_split_on = [("##", "Chapter"), ("###", "Section")]
 markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
 docs = markdown_splitter.split_text(markdown_document)
 
-# 构建 Qdrant 混合索引
-vectorstore = QdrantVectorStore.from_documents(
-    docs,
-    embedding=embedder,
-    sparse_embedding=sparse_embeddings,
-    location=":memory:",
-    collection_name="nutriguard_collection",
-    retrieval_model="hybrid"
-)
-retriever = vectorstore.as_retriever(search_kwargs={"k": 10}) # 粗排 Top 10
+retriever = None
+reranker = None
 
-print(f" 正在挂载本地 BGE-Reranker 精排模型: {RERANKER_PATH}", file=sys.stderr)
-reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+if embedder is None:
+    print(" [RAG] BGE 模型未加载，RAG 检索引擎将不可用", file=sys.stderr)
+else:
+    # 构建 Qdrant 混合索引
+    vectorstore = QdrantVectorStore.from_documents(
+        docs,
+        embedding=embedder,
+        sparse_embedding=sparse_embeddings,
+        location=":memory:",
+        collection_name="nutriguard_collection",
+        retrieval_mode="hybrid"
+    )
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
 
-def perform_rag_search(query:str,top_k:int = 3) ->str:
+    if os.path.isdir(RERANKER_PATH):
+        print(f" 正在挂载本地 BGE-Reranker 精排模型: {RERANKER_PATH}", file=sys.stderr)
+        reranker = CrossEncoder(RERANKER_PATH)
+    else:
+        print(f" 本地 Reranker 不存在，从 HuggingFace 加载...", file=sys.stderr)
+        reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+
+    print(" RAG 检索引擎全量就绪！", file=sys.stderr)
+
+
+def perform_rag_search(query: str, top_k: int = 3) -> str:
     """
-    内部RAG检索引擎 
+    内部RAG检索引擎：双路召回 + Reranker 精排。
+    若模型未就绪则返回空字符串，由调用方降级处理。
     """
+    if retriever is None or reranker is None:
+        return ""
+
     # A 双路召回
     rough_docs = retriever.invoke(query)
     if not rough_docs:
-        return "本地健康知识库中未找到相关内容。"
+        return ""
 
     # B Rerank
-    sentence_pairs = [[query,doc.page_content] for doc in rough_docs]
+    sentence_pairs = [[query, doc.page_content] for doc in rough_docs]
     scores = reranker.predict(sentence_pairs)
 
-    scored_docs = list(zip(rough_docs,scores))
-    scored_docs.sort(key = lambda x:x[1] , reverse=True)
+    scored_docs = list(zip(rough_docs, scores))
+    scored_docs.sort(key=lambda x: x[1], reverse=True)
     top_docs = scored_docs[:top_k]
 
     # 组装为Context
     context_parts = []
-    for i, (doc, score) in enumerate(top_docs):
-        meta = doc.metadata.get('Section', '通用营养知识')
+    for doc, score in top_docs:
+        meta = doc.metadata.get("Section", "通用营养知识")
         context_parts.append(f"【{meta}】(相关度: {score:.2f})\n{doc.page_content}")
-        
-    return "\n\n".join(context_parts)
 
-print(" RAG 检索引擎全量就绪！", file=sys.stderr)
+    return "\n\n".join(context_parts)
 
 
 # ============================
@@ -198,7 +211,10 @@ async def search_diet_guidelines(query:str)->str:
     专门用于查询《中国居民膳食指南》和普适性营养原则。
     """
     print(f" [MCP 检索] 正在查阅膳食指南: {query}", file=sys.stderr)
-    return f"【模拟检索结果】关于 '{query}' 的膳食指南建议：每天应保持食物多样性，控制添加糖摄入。"
+    context = perform_rag_search(query)
+    if not context:
+        return "抱歉，本地知识库暂时不可用，请稍后再试。"
+    return f"【膳食指南检索结果】\n{context}"
 
 @mcp.tool()
 async def check_food_gi(food_name: str) -> str:
@@ -206,10 +222,10 @@ async def check_food_gi(food_name: str) -> str:
     查询特定食物的升糖指数(GI)和血糖负荷(GL)。
     """
     print(f" [MCP 检索] 正在查询 GI 数据库: {food_name}", file=sys.stderr)
-    # 模拟 Redis 查表或 Qdrant 查表
-    mock_db = {"白米饭": "GI=83 (高)", "糙米饭": "GI=56 (中低)", "燕麦片": "GI=65 (中)"}
-    result = mock_db.get(food_name, "GI 数据未知")
-    return f"{food_name} 的升糖指数为: {result}"
+    context = perform_rag_search(f"{food_name} 升糖指数 GI 血糖负荷")
+    if not context:
+        return f"关于「{food_name}」的升糖指数数据暂未收录，建议咨询专业营养师。"
+    return f"【{food_name} GI 检索结果】\n{context}"
 
 @mcp.tool()
 async def search_medical_taboos(disease_name: str) -> str:
@@ -226,12 +242,12 @@ async def search_medical_taboos(disease_name: str) -> str:
         print(f"⚡ [Redis 极速返回] 耗时: {latency:.2f} ms", file=sys.stderr)
         return cached_result
 
-    # 未命中缓存，执行真实的重度检索（模拟休眠 2 秒代表去查 Qdrant 和 Reranker）
+    # 未命中缓存，执行真实的双路召回 + Reranker 检索
     print(f"[Cache 未命中] 正在执行深度 RAG 检索: {disease_name}...", file=sys.stderr)
-    time.sleep(2) # 模拟耗时操作
-    
-    # 生成结果
-    real_answer = f"【深度检索结果】{disease_name} 患者应当严格控制嘌呤和游离糖的摄入，遵循临床营养指南。"
+    context = perform_rag_search(disease_name)
+    if not context:
+        return "抱歉，本地知识库暂时不可用，请稍后再试。"
+    real_answer = f"【{disease_name} 深度检索结果】\n{context}"
     
     # 异步写入缓存（为后续相同的提问铺路）
     save_to_cache(disease_name, real_answer)
