@@ -30,9 +30,10 @@ async def lifespan(app:FastAPI):
     使用 AsyncExitStack 扁平化管理多个异步上下文，确保关机。
     """
     print("[生命周期] 正在启动API网关，底层微服务")
-
+    redis_client = redis.Redis(host="localhost",port=6379,decode_responses=True)
     async with AsyncExitStack() as stack:
         try:
+            
             # 1 链接MCP子进程
             server_params = StdioServerParameters(command=sys.executable,args=["mcp_server.py"])
             stdio_transport = await stack.enter_async_context(stdio_client(server_params))
@@ -48,6 +49,7 @@ async def lifespan(app:FastAPI):
             # 路由tools给不同的agent
             rag_tool_names = {"search_diet_guidelines", "check_food_gi", "search_medical_taboos"}
             rag_tools = [t for t in all_tools if t.name in rag_tool_names]
+            action_tool_names = {"log_user_meal","calculate_daily_calories","generate_shopping_list"}
             action_tools = [t for t in all_tools if t.name not in rag_tool_names]
 
             # 组装LangGraph,挂载到FastAPI的全局state
@@ -58,7 +60,7 @@ async def lifespan(app:FastAPI):
             yield
 
         except Exception as e:
-            print("[生命周期错误] 启动失败：{e}")
+            print(f"[生命周期错误] 启动失败：{e}")
             raise
         finally:
             print("[生命周期]收到关闭信号，清理连接池与子进程...")
@@ -101,7 +103,49 @@ async def sliding_window_rate_limiter(request:Request):
         pass  # 降级，不阻塞业务
 
 # ==========================================
-#   3. 流式对话接口SSE
+#   3. 健康检查探针
+# ==========================================  
+@app.get("/health", tags=["Monitor"])
+async def health_check():
+    """
+    专为 K8s 和 Docker Compose 设计的健康探测接口。
+    不仅检查 Web 服务存活，还会下钻检查 Redis 和核心图引擎状态。
+    """
+    health_status = {
+        "status": "up",
+        "timestamp": time.time(),
+        "components": {
+            "web_framework": "fastapi",
+            "redis_cache": "unknown",
+            "brain_engine": "ready" if hasattr(app.state, "graph") else "initializing"
+        }
+    }
+    
+    # 深度探测 Redis 连通性
+    try:
+        # 设置极短的超时时间，防止健康检查本身把服务拖死
+        async with asyncio.timeout(1.0):
+            await redis_client.ping()
+            health_status["components"]["redis_cache"] = "connected"
+    except (redis.exceptions.ConnectionError, asyncio.TimeoutError):
+        health_status["components"]["redis_cache"] = "disconnected"
+        # \ 架构师决策：因为我们前面写了优雅降级（Redis 挂了也能聊天），
+        # 所以我们把整体状态标为 degraded（降级），而不是抛出 503 把整个 Pod 杀掉。
+        health_status["status"] = "degraded"
+        
+    # 如果核心图引擎都没加载出来（比如 lifespan 卡住了），那就是致命错误
+    if health_status["components"]["brain_engine"] == "initializing":
+        health_status["status"] = "down"
+        raise HTTPException(
+            status_code=503, 
+            detail=health_status
+        )
+        
+    return health_status
+
+
+# ==========================================
+#   4. 流式对话接口SSE
 # ==========================================     
 class ChatRequest(BaseModel):
     session_id: str = "default_user_001"
@@ -127,7 +171,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                 # 抓取底层 LLM 生成的实时文字片段 (打字机效果)
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
-                    if hasattr(chunk, "content") and chunk.content:
+                    if hasattr(chunk, "content") and chunk.content is not None:
                         # 遵循 Server-Sent Events (SSE) 规范
                         yield f"data: {json.dumps({'type': 'text', 'content': chunk.content}, ensure_ascii=False)}\n\n"
                         
