@@ -62,7 +62,11 @@ class TestGraphTopology:
     def test_all_nodes_registered(self, graph):
         """所有核心节点均已注册"""
         node_names = set(graph.get_graph().nodes.keys())
-        expected = {"supervisor", "rag_expert", "action_expert", "slot_filler", "memory_compressor", "__start__", "__end__"}
+        expected = {
+            "supervisor", "rag_expert", "rag_reflection",
+            "action_expert", "slot_filler", "memory_compressor",
+            "__start__", "__end__",
+        }
         missing = expected - node_names
         assert not missing, f"缺少节点: {missing}"
 

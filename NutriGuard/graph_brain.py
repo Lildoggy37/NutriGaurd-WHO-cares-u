@@ -4,7 +4,9 @@ import os
 from typing import Annotated, Sequence, TypedDict, Literal, Dict
 from pydantic import BaseModel,Field
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage,RemoveMessage
+from langchain_core.messages import (
+    BaseMessage, HumanMessage, SystemMessage, RemoveMessage, AIMessage, ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
@@ -115,6 +117,109 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         response = "为了给您更精准的建议，请问您刚才提到的食物具体分量是多少呢？（例如：一小碗、200g）"
         return {"messages": [SystemMessage(content=response, name="slot_filler")], "next_node": "FINISH"}
 
+    # =====================================
+    #    4.5 Reflection —— RAG 回答合规审查
+    # =====================================
+    class ReflectionVerdict(BaseModel):
+        verdict: Literal["PASS", "CORRECT", "REJECT"] = Field(description="审查判定结果")
+        reason: str = Field(description="判定理由，须引用证据中的具体矛盾点")
+        risk_items: str = Field(default="", description="发现的风险点，若无不填")
+
+    reflection_llm = llm.with_structured_output(ReflectionVerdict)
+
+    async def rag_reflection_node(state: AgentState):
+        """
+        RAG 回答的事后合规审查。
+        从消息历史中提取检索证据和 AI 回答，用独立 LLM 审查幻觉/安全/完整性。
+        """
+        print(" [Reflection] 正在审查 RAG 回答的合规性...")
+        messages = state["messages"]
+
+        # --- 找到最后一条 AI 回答 + 所有工具检索结果 ---
+        last_ai = None
+        evidence_parts = []
+
+        for m in messages:
+            if isinstance(m, AIMessage):
+                # 过滤掉 tool_call 的中间 AIMessage，只保留最终回答
+                tc = getattr(m, "tool_calls", None)
+                if not tc:
+                    last_ai = m
+            if isinstance(m, ToolMessage):
+                evidence_parts.append(str(m.content)[:800])
+
+        if last_ai is None:
+            print(" [Reflection] 未找到 AI 回答，跳过审查", flush=True)
+            return {"next_node": "supervisor"}
+
+        answer_text = str(last_ai.content)[:2000]
+        evidence = "\n---\n".join(evidence_parts[-5:]) or "（本次未检索到外部资料，回答完全依赖模型自身知识）"
+
+        review_prompt = f"""你是医疗健康内容合规审查员。请严格审查以下 AI 营养学回答。
+
+        【证据——检索到的权威资料】
+        {evidence[:3000]}
+
+        【AI 生成的回答】
+        {answer_text}
+
+        【审查标准】
+        1. 幻觉检测：回答中每条营养/医学声明是否在证据中有出处？引用是否准确？
+        2. 安全合规：是否包含危险饮食建议（如极端断食、滥用药物）？是否缺少「仅供参考，请咨询医生」类声明？
+        3. 完整性：是否正面、直接地回答了用户问题？
+
+        【判定规则】
+        - PASS：安全、准确、完整，直接放行
+        - CORRECT：有小瑕疵（如措辞不够严谨、缺少免责声明），附修正建议后放行
+        - REJECT：存在虚构数据、危险建议、或与证据严重矛盾，必须拦截
+        """
+
+        try:
+            verdict: ReflectionVerdict = await reflection_llm.ainvoke(
+                [SystemMessage(content=review_prompt)]
+            )
+            print(f" [Reflection] 判定: {verdict.verdict} | {verdict.reason}")
+
+            if verdict.verdict == "PASS":
+                return {"next_node": "supervisor"}
+
+            elif verdict.verdict == "CORRECT":
+                note = SystemMessage(
+                    content=(
+                        f" [合规审查·修正] {verdict.reason}"
+                        + (f"\n风险提示: {verdict.risk_items}" if verdict.risk_items else "")
+                    ),
+                    name="reflection",
+                )
+                return {"messages": [note], "next_node": "supervisor"}
+
+            else:  # REJECT
+                delete_ops = (
+                    [RemoveMessage(id=last_ai.id)]
+                    if getattr(last_ai, "id", None) else []
+                )
+                safe_msg = SystemMessage(
+                    content=(
+                        " 【系统提示】经合规审查，上一条回答存在以下问题，已被拦截：\n"
+                        f"  — {verdict.reason}\n"
+                        + (f"  — 风险项: {verdict.risk_items}\n" if verdict.risk_items else "")
+                        + "\n建议您：\n"
+                        "  1. 咨询执业医师或注册营养师获取个性化建议\n"
+                        "  2. 换一种更具体的问法重新提问\n"
+                        "  3. 参考权威机构（如中国营养学会）发布的官方指南"
+                    ),
+                    name="reflection",
+                )
+                return {"messages": delete_ops + [safe_msg], "next_node": "supervisor"}
+
+        except Exception as e:
+            print(f" [Reflection 审查异常] {e}，降级放行", flush=True)
+            return {"next_node": "supervisor"}
+
+
+    # =====================================
+    #    4.5 memory_compressor 记忆压缩结点
+    # =====================================
 
     # 并发安全的记忆管理
     async def memory_compressor_node(state:AgentState):
@@ -164,12 +269,13 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     # register all node
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("rag_expert", rag_expert_node)
+    workflow.add_node("rag_reflection", rag_reflection_node)
     workflow.add_node("action_expert", action_expert_node)
     workflow.add_node("slot_filler", slot_filler_node)
-    workflow.add_node("memory_compressor",memory_compressor_node)
+    workflow.add_node("memory_compressor", memory_compressor_node)
 
     # 其实结点
-    workflow.add_edge(START,"supervisor")
+    workflow.add_edge(START, "supervisor")
 
     # conditional_edges
     workflow.add_conditional_edges(
@@ -179,19 +285,22 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             "rag_expert": "rag_expert",
             "action_expert": "action_expert",
             "slot_filler": "slot_filler",
-            "FINISH": END
-        }
+            "FINISH": END,
+        },
     )
 
-    # 当子结点运作完回到主节点
-    workflow.add_edge("rag_expert","memory_compressor")
-    workflow.add_edge("action_expert","memory_compressor")
+    # RAG 路径: rag_expert → rag_reflection → memory_compressor → supervisor
+    workflow.add_edge("rag_expert", "rag_reflection")
+    workflow.add_edge("rag_reflection", "memory_compressor")
 
-    workflow.add_edge("memory_compressor","supervisor")
+    # Action 路径: action_expert → memory_compressor → supervisor
+    workflow.add_edge("action_expert", "memory_compressor")
+
+    workflow.add_edge("memory_compressor", "supervisor")
 
     if checkpointer is None:
         checkpointer = MemorySaver()
     # compile
     app_graph = workflow.compile(checkpointer=checkpointer)
-    print("✅ [系统初始化] 多智能体神经网络编译完成！")
+    print("[系统初始化] 多智能体神经网络编译完成！")
     return app_graph

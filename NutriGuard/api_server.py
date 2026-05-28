@@ -178,7 +178,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                 # 抓取图节点流转状态 (用于前端展示 Agent 思考路径/进度条)
                 elif kind == "on_chain_start":
                     node_name = event.get("name", "")
-                    if node_name in ["supervisor", "rag_expert", "action_expert", "slot_filler", "memory_compressor"]:
+                    if node_name in ["supervisor", "rag_expert", "rag_reflection", "action_expert", "slot_filler", "memory_compressor"]:
                         yield f"data: {json.dumps({'type': 'status', 'content': f'🔍 节点 [{node_name}] 开始思考...'}, ensure_ascii=False)}\n\n"
                         
         except Exception as e:
