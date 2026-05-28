@@ -8,7 +8,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage,Rem
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt import ToolNode
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
 
 
@@ -25,10 +25,12 @@ class AgentState(TypedDict):
 # =====================================
 #    2. 图引擎工厂 解决MCP工具加载问题
 # =====================================
-def build_multi_agent_graph(rag_tools:list,action_tools:list):
+def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None):
     """
     控制反转 (IoC)：图引擎不再负责连接 MCP，而是接收外部传入的 tools 进行动态编译。
     这彻底解决了顶层模块同步加载与 MCP 异步长连接的死锁问题。
+
+    checkpointer: 可选，默认使用内存检查点。测试时可传入 None 关闭持久化。
     """
     
     llm = ChatOpenAI(
@@ -38,16 +40,16 @@ def build_multi_agent_graph(rag_tools:list,action_tools:list):
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
 
-    rag_agent = create_react_agent(
+    rag_agent = create_agent(
         model=llm,
         tools=rag_tools,
-        state_modifier="你是一个顶级的营养学与 RAG 检索专家。请优先调用工具查询专业数据，绝不要瞎编医学常识。回答要客观严谨。"
+        system_prompt="你是一个顶级的营养学与 RAG 检索专家。请优先调用工具查询专业数据，绝不要瞎编医学常识。回答要客观严谨。"
     )
 
-    action_agent = create_react_agent(
+    action_agent = create_agent(
         model=llm,
         tools=action_tools,
-        state_modifier="你是一个极其严谨的健康管家。你的职责是调用工具记录饮食和热量。如果用户提供的信息不够，你可以反问。"
+        system_prompt="你是一个极其严谨的健康管家。你的职责是调用工具记录饮食和热量。如果用户提供的信息不够，你可以反问。"
     )
 
     # =====================================
@@ -187,8 +189,9 @@ def build_multi_agent_graph(rag_tools:list,action_tools:list):
 
     workflow.add_edge("memory_compressor","supervisor")
 
-    memory = MemorySaver()
+    if checkpointer is None:
+        checkpointer = MemorySaver()
     # compile
-    app_graph = workflow.compile(checkpointer=memory)
+    app_graph = workflow.compile(checkpointer=checkpointer)
     print("✅ [系统初始化] 多智能体神经网络编译完成！")
     return app_graph
