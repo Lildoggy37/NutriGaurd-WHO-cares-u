@@ -34,9 +34,9 @@ async def run_stub_test():
             tools = await load_mcp_tools(session)
             
             llm = ChatOpenAI(
-                api_key=os.getenv("DEEPSEEK_API_KEY"),
-                base_url="https://api.deepseek.com/v1",
-                model="deepseek-chat"
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                model="qwen-plus"
             )
             
             # 创建最小化测试 Agent

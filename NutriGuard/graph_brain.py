@@ -32,10 +32,10 @@ def build_multi_agent_graph(rag_tools:list,action_tools:list):
     """
     
     llm = ChatOpenAI(
-        model="deepseek-chat",
+        model="qwen-plus",
         temperature=0.0,
-        api_key=os.getenv("DEEPSEEK_API_KEY"),
-        base_url="https://api.deepseek.com/v1"
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
     )
 
     rag_agent = create_react_agent(
