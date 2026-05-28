@@ -8,8 +8,13 @@ from redis.commands.search.field import TextField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
 from fastmcp import FastMCP
 from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import MarkdownHeaderTextSplitter
+from langchain_qdrant import QdrantVectorStore, FastEmbedSparse
+from sentence_transformers import CrossEncoder
 # ============================
 #   1. 构建MCP Redis  本地向量模型
 # ============================
@@ -25,6 +30,9 @@ except Exception as e:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 BGE_MODEL_PATH = os.path.join(BASE_DIR, "models", "bge-large-zh-v1.5")
+RERANKER_PATH = os.path.join(BASE_DIR, "models", "bge-reranker-v2-m3")
+CORPUS_PATH = os.path.join(BASE_DIR, "data", "mock_corpus.md")
+
 
 # 加载BGE模型，来Cache计算向量
 embedder = None
@@ -42,7 +50,65 @@ except Exception as e:
 
 
 # ============================
-#   2. Redis 语义缓存
+#   2. RAG
+# ============================
+print("初始化Qdrant双路召回与本地知识库......",file=sys.stderr)
+
+# sparse model
+sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+
+# 读取本地语料进行分割
+with open(CORPUS_PATH,"r",encoding="utf-8") as f:
+    markdown_document = f.read()
+
+headers_to_split_on = [("##", "Chapter"), ("###", "Section")]
+markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
+docs = markdown_splitter.split_text(markdown_document)
+
+# 构建 Qdrant 混合索引
+vectorstore = QdrantVectorStore.from_documents(
+    docs,
+    embedding=embedder,
+    sparse_embedding=sparse_embeddings,
+    location=":memory:",
+    collection_name="nutriguard_collection",
+    retrieval_model="hybrid"
+)
+retriever = vectorstore.as_retriever(search_kwargs={"k": 10}) # 粗排 Top 10
+
+print(f" 正在挂载本地 BGE-Reranker 精排模型: {RERANKER_PATH}", file=sys.stderr)
+reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+
+def perform_rag_search(query:str,top_k:int = 3) ->str:
+    """
+    内部RAG检索引擎 
+    """
+    # A 双路召回
+    rough_docs = retriever.invoke(query)
+    if not rough_docs:
+        return "本地健康知识库中未找到相关内容。"
+
+    # B Rerank
+    sentence_pairs = [[query,doc.page_content] for doc in rough_docs]
+    scores = reranker.predict(sentence_pairs)
+
+    scored_docs = list(zip(rough_docs,scores))
+    scored_docs.sort(key = lambda x:x[1] , reverse=True)
+    top_docs = scored_docs[:top_k]
+
+    # 组装为Context
+    context_parts = []
+    for i, (doc, score) in enumerate(top_docs):
+        meta = doc.metadata.get('Section', '通用营养知识')
+        context_parts.append(f"【{meta}】(相关度: {score:.2f})\n{doc.page_content}")
+        
+    return "\n\n".join(context_parts)
+
+print(" RAG 检索引擎全量就绪！", file=sys.stderr)
+
+
+# ============================
+#   3. Redis 语义缓存
 # ============================
 INDEX_NAME = "idx:semantic_cache"
 
