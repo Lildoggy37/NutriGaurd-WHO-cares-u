@@ -47,7 +47,7 @@ async def lifespan(app:FastAPI):
             all_tools = await load_mcp_tools(session)
 
             # 路由tools给不同的agent
-            rag_tool_names = {"search_diet_guidelines", "check_food_gi", "search_medical_taboos"}
+            rag_tool_names = {"search_diet_guidelines", "check_food_gi", "search_medical_taboos", "search_food"}
             rag_tools = [t for t in all_tools if t.name in rag_tool_names]
             action_tool_names = {"log_user_meal","calculate_daily_calories","generate_shopping_list"}
             action_tools = [t for t in all_tools if t.name in action_tool_names]

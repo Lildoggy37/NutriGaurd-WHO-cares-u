@@ -11,3 +11,4 @@ __pycache__/
 5.langgraph
 NutriGuard/data/
 NutriGuard/models/
+NutriGuard/nutriguard.db

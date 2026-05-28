@@ -13,6 +13,9 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse
 from sentence_transformers import CrossEncoder
+
+from db import init_db, log_meal, get_today_calories, lookup_food, list_foods, get_food_categories
+
 # ============================
 #   1. 构建MCP Redis  本地向量模型
 # ============================
@@ -45,6 +48,10 @@ try:
         print(f"  请下载模型到该路径或修改 BGE_MODEL_PATH", file=sys.stderr)
 except Exception as e:
     print(f"⚠ [MCP Server] BGE 模型加载失败: {e}", file=sys.stderr)
+
+# 初始化 SQLite 数据库
+init_db()
+print("✓ [MCP Server] SQLite 数据库就绪", file=sys.stderr)
 
 
 # ============================
@@ -260,31 +267,231 @@ async def search_medical_taboos(disease_name: str) -> str:
 # ============================
 #   class2  业务行动类 Write N Compute
 # ============================
+
+# 常见食物份量映射（用于解析自然语言描述）
+PORTION_MAP = {
+    "个": 1, "只": 1, "根": 1, "块": 1, "片": 1, "粒": 1, "颗": 1,
+    "碗": 1, "盘": 1, "杯": 1, "勺": 1, "份": 1,
+}
+# 食物名到默认份量的映射
+_DEFAULT_GRAMS_MAP = {
+    "包子": 100, "馒头": 100, "饺子": 25, "馄饨": 20, "鸡蛋": 60,
+    "苹果": 200, "香蕉": 120, "橙子": 200, "米饭": 150, "面条": 200,
+    "牛奶": 250, "豆浆": 250, "酸奶": 250, "粥": 300, "汤": 300,
+    "面包": 50, "饼干": 20, "蛋糕": 80, "核桃": 10, "花生": 10,
+    "豆腐": 200, "玉米": 150, "红薯": 200, "土豆": 150,
+    "鸡胸肉": 150, "牛肉": 150, "猪肉": 100, "猪瘦肉": 100,
+    "三文鱼": 150, "虾仁": 150, "带鱼": 150,
+    "西兰花": 200, "菠菜": 200, "番茄": 150, "黄瓜": 150,
+    "胡萝卜": 150, "大白菜": 200, "冬瓜": 200,
+}
+
+
+def _estimate_default_grams(food_name: str) -> float:
+    """根据食物名模糊匹配默认份量"""
+    if food_name in _DEFAULT_GRAMS_MAP:
+        return _DEFAULT_GRAMS_MAP[food_name]
+    for key, val in _DEFAULT_GRAMS_MAP.items():
+        if key in food_name or food_name in key:
+            return val
+    return 100.0
+
+
+def _parse_food_items(raw: str) -> list[dict]:
+    """
+    解析食物输入字符串为结构化列表。
+    支持格式：
+      - "食物名:200g" 或 "食物名:3个"
+      - "200g鸡胸肉, 300g西兰花"
+      - "2个包子, 1杯牛奶"
+    未指定份量时使用 _DEFAULT_GRAMS_MAP 估算。
+    """
+    import re
+
+    results = []
+    parts = [p.strip() for p in raw.replace("，", ",").split(",") if p.strip()]
+
+    for part in parts:
+        # 尝试 "数量g食物名" 或 "食物名:数量g" 格式
+        match = re.match(r"(\d+)\s*g\s*(.+)", part)
+        if not match:
+            match = re.match(r"(.+)[:：]\s*(\d+)\s*(g|克|ml|个|碗|杯|只|根|块|片|粒|颗|勺|盘|份)?", part)
+            if match:
+                name = match.group(1).strip()
+                amount = float(match.group(2))
+                unit = match.group(3) or "g"
+                if unit in ("ml", "克", "g"):
+                    results.append({"name": name, "amount_g": amount})
+                elif unit in PORTION_MAP:
+                    default = _estimate_default_grams(name)
+                    results.append({"name": name, "amount_g": default * amount})
+                else:
+                    results.append({"name": name, "amount_g": amount})
+                continue
+            # 尝试 "数量单位食物名"
+            match = re.match(r"(\d+)\s*(个|碗|杯|只|根|块|片|粒|颗|勺|盘|份|g|克|ml)\s*(.+)", part)
+            if match:
+                amount = float(match.group(1))
+                unit = match.group(2)
+                name = match.group(3).strip()
+                if unit in ("g", "克", "ml"):
+                    results.append({"name": name, "amount_g": amount})
+                else:
+                    default = _estimate_default_grams(name)
+                    results.append({"name": name, "amount_g": default * amount})
+                continue
+            # 纯食物名，用默认份量
+            if part:
+                default = _estimate_default_grams(part)
+                results.append({"name": part, "amount_g": default})
+            continue
+
+        if match:
+            amount = float(match.group(1))
+            name = match.group(2).strip()
+            results.append({"name": name, "amount_g": amount})
+        else:
+            if part:
+                default = _estimate_default_grams(part)
+                results.append({"name": part, "amount_g": default})
+
+    return results
+
+
+@mcp.tool()
+async def search_food(food_name: str) -> str:
+    """
+    查询食物营养数据库，获取食物的热量、蛋白质、脂肪、碳水、纤维、GI等数据。
+    适合查询具体食物的营养成分，比 RAG 检索更精确。
+    """
+    food = lookup_food(food_name)
+    if not food:
+        return f"未找到「{food_name}」的营养数据。可以尝试使用更通用的食物名称。"
+
+    lines = [
+        f"【{food['name']}】({food['category']})",
+        f"  热量: {food['calories_per_100g']} kcal/100g",
+        f"  蛋白质: {food['protein_per_100g']} g/100g",
+        f"  脂肪: {food['fat_per_100g']} g/100g",
+        f"  碳水化合物: {food['carbs_per_100g']} g/100g",
+    ]
+    if food["fiber_per_100g"]:
+        lines.append(f"  膳食纤维: {food['fiber_per_100g']} g/100g")
+    if food["gi"] and food["gi"] > 0:
+        gi_level = "低 GI" if food["gi"] <= 55 else ("中 GI" if food["gi"] <= 70 else "高 GI")
+        lines.append(f"  升糖指数(GI): {food['gi']} ({gi_level})")
+
+    return "\n".join(lines)
+
+
 @mcp.tool()
 async def log_user_meal(user_id: str, meal_type: str, food_items: str) -> str:
     """
     记录用户的实际饮食（如早餐、午餐）。
-    必须参数: user_id (用户唯一ID), meal_type (如'早餐'), food_items (如'2个包子,1杯牛奶')
+    必须参数:
+      - user_id: 用户唯一ID
+      - meal_type: 餐次类型（早餐/午餐/晚餐/加餐）
+      - food_items: 食物描述，例如 '2个包子,1杯牛奶'、'鸡胸肉:200g,西兰花:300g'
+
+    工具会自动匹配食物营养数据库并计算热量。
     """
     print(f" [MCP 行动] 正在写入饮食日志 | 用户:{user_id} | {meal_type}: {food_items}", file=sys.stderr)
-    # 在真实项目中，这里会引入 Redis 分布式锁，防止高并发脏写
-    return f"已成功为用户 {user_id} 记录{meal_type}: {food_items}。"
+
+    items = _parse_food_items(food_items)
+    if not items:
+        return "无法解析食物内容，请使用格式如：'鸡胸肉:200g, 西兰花:300g'"
+
+    try:
+        meal_id = log_meal(user_id, meal_type, items)
+    except Exception as e:
+        print(f" [DB 写入失败] {e}", file=sys.stderr)
+        return f"记录失败：{e}"
+
+    # 统计本餐热量
+    total_cal = 0.0
+    detail_lines = []
+    for item in items:
+        food = lookup_food(item["name"])
+        if food and food["calories_per_100g"]:
+            cal = round(food["calories_per_100g"] * item["amount_g"] / 100, 1)
+            total_cal += cal
+            detail_lines.append(f"  {item['name']} {item['amount_g']}g → {cal} kcal")
+        else:
+            detail_lines.append(f"  {item['name']} {item['amount_g']}g → 未找到营养数据")
+
+    header = f"已记录 {user_id} 的{meal_type}（#{meal_id}），本餐约 {round(total_cal, 1)} kcal"
+    return header + "\n" + "\n".join(detail_lines)
+
 
 @mcp.tool()
 async def calculate_daily_calories(user_id: str) -> str:
     """
-    计算用户今天已记录的总热量摄入和剩余配额。
+    计算用户今天已记录的总热量摄入，并与推荐摄入量对比。
     """
     print(f" [MCP 行动] 正在核算今日卡路里 | 用户:{user_id}", file=sys.stderr)
-    return f"用户 {user_id} 今日已摄入 1250 kcal，建议剩余摄入 550 kcal。"
+
+    total, rows = get_today_calories(user_id)
+
+    if not rows:
+        return f"用户 {user_id} 今天还没有饮食记录。建议每日摄入约 2000 kcal。"
+
+    # 统计各餐次
+    meals_summary = {}
+    for r in rows:
+        mt = r["meal_type"]
+        if mt not in meals_summary:
+            meals_summary[mt] = 0.0
+        meals_summary[mt] += r["calories"] or 0
+
+    lines = [f"用户 {user_id} 今日饮食汇总：", f"  总摄入: {total} kcal"]
+    for mt, cal in meals_summary.items():
+        lines.append(f"  {mt}: {round(cal, 1)} kcal")
+
+    recommended = 2000
+    remaining = round(recommended - total, 1)
+    if remaining > 0:
+        lines.append(f"  推荐摄入: {recommended} kcal，剩余配额: {remaining} kcal")
+    else:
+        lines.append(f"  推荐摄入: {recommended} kcal，已超出: {abs(remaining)} kcal")
+
+    return "\n".join(lines)
+
 
 @mcp.tool()
 async def generate_shopping_list(ingredients: str) -> str:
     """
-    根据食谱生成结构化的超市采购清单。
+    根据食谱生成按分类排列的超市采购清单。
     """
     print(f" [MCP 行动] 正在生成采购清单: {ingredients}", file=sys.stderr)
-    return f"【生成成功】采购清单：{ingredients} (已按生鲜、干货分类)。"
+
+    parts = [p.strip() for p in ingredients.replace("，", ",").split(",") if p.strip()]
+    if not parts:
+        return "请提供需要采购的食材列表。"
+
+    categories: dict[str, list[str]] = {}
+    unknown = []
+
+    for name in parts:
+        # 去掉数量前缀
+        clean = name.lstrip("0123456789克公斤斤个只根块片粒颗勺碗盘杯份gml ")
+        food = lookup_food(clean)
+        if food:
+            cat = food["category"]
+            categories.setdefault(cat, []).append(clean)
+        else:
+            unknown.append(clean)
+
+    lines = ["【采购清单】"]
+    for cat, items in categories.items():
+        lines.append(f"\n  [{cat}]")
+        for item in items:
+            lines.append(f"    - {item}")
+    if unknown:
+        lines.append(f"\n  [未分类]")
+        for item in unknown:
+            lines.append(f"    - {item}")
+
+    return "\n".join(lines)
 
 
 if __name__ == "__main__":
