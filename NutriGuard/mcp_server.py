@@ -14,7 +14,11 @@ from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse
 from sentence_transformers import CrossEncoder
 
-from db import init_db, log_meal, get_today_calories, lookup_food, list_foods, get_food_categories
+from db import (
+    init_db, log_meal, get_today_calories, lookup_food, list_foods, get_food_categories,
+    upsert_health_profile, get_health_profile,
+)
+from nutrition import calculate_daily_target, format_target_report
 
 # ============================
 #   1. 构建MCP Redis  本地向量模型
@@ -385,6 +389,52 @@ async def search_food(food_name: str) -> str:
 
 
 @mcp.tool()
+async def update_health_profile(
+    user_id: str,
+    gender: str | None = None,
+    age: int | None = None,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    activity_level: str | None = None,
+    conditions: str | None = None,
+) -> str:
+    """
+    更新用户的健康画像（身高、体重、年龄、性别、活动水平、疾病）。
+    用户提到个人信息时调用此工具记录，仅传入已知的参数。
+    """
+    print(f" [MCP 行动] 更新健康画像 | 用户:{user_id}", file=sys.stderr)
+
+    try:
+        profile = upsert_health_profile(
+            user_id=user_id,
+            gender=gender,
+            age=age,
+            height_cm=height_cm,
+            weight_kg=weight_kg,
+            activity_level=activity_level,
+            conditions=conditions,
+        )
+    except Exception as e:
+        print(f" [DB 写入失败] {e}", file=sys.stderr)
+        return f"画像更新失败：{e}"
+
+    lines = [f"已更新用户 {user_id} 的健康画像："]
+    if profile.get("gender"):
+        lines.append(f"  性别: {profile['gender']}")
+    if profile.get("age"):
+        lines.append(f"  年龄: {profile['age']} 岁")
+    if profile.get("height_cm"):
+        lines.append(f"  身高: {profile['height_cm']} cm")
+    if profile.get("weight_kg"):
+        lines.append(f"  体重: {profile['weight_kg']} kg")
+    if profile.get("activity_level"):
+        lines.append(f"  活动水平: {profile['activity_level']}")
+    if profile.get("conditions"):
+        lines.append(f"  健康状况: {profile['conditions']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
 async def log_user_meal(user_id: str, meal_type: str, food_items: str) -> str:
     """
     记录用户的实际饮食（如早餐、午餐）。
@@ -426,33 +476,73 @@ async def log_user_meal(user_id: str, meal_type: str, food_items: str) -> str:
 @mcp.tool()
 async def calculate_daily_calories(user_id: str) -> str:
     """
-    计算用户今天已记录的总热量摄入，并与推荐摄入量对比。
+    计算用户今天已记录的总热量摄入，并与个性化推荐目标对比。
+    会根据用户健康画像（身高、体重、年龄、性别、疾病）动态计算目标值。
+    如果用户画像不存在，先提示用户补充基本信息。
     """
     print(f" [MCP 行动] 正在核算今日卡路里 | 用户:{user_id}", file=sys.stderr)
 
+    # 1. 获取健康画像 → 计算个性化目标
+    profile = get_health_profile(user_id)
+
+    if not profile or not profile.get("gender"):
+        total, rows = get_today_calories(user_id)
+        lines = ["未找到用户健康画像，无法计算个性化目标。"]
+        if rows:
+            meals_summary = {}
+            for r in rows:
+                mt = r["meal_type"]
+                meals_summary[mt] = meals_summary.get(mt, 0.0) + (r["calories"] or 0)
+            lines.append(f"\n今日已记录: {total} kcal")
+            for mt, cal in meals_summary.items():
+                lines.append(f"  {mt}: {round(cal, 1)} kcal")
+        lines.append("\n请告诉我您的身高、体重、年龄和性别，我可以为您定制目标。")
+        return "\n".join(lines)
+
+    # 解析疾病列表
+    conditions_str = profile.get("conditions", "") or ""
+    conditions = [c.strip() for c in conditions_str.split(",") if c.strip()]
+
+    target = calculate_daily_target(
+        gender=profile["gender"],
+        age=profile["age"] or 30,
+        height_cm=profile["height_cm"] or 170,
+        weight_kg=profile["weight_kg"] or 70,
+        activity_level=profile["activity_level"] or "久坐",
+        conditions=conditions,
+    )
+
+    # 2. 获取今日已摄入
     total, rows = get_today_calories(user_id)
 
-    if not rows:
-        return f"用户 {user_id} 今天还没有饮食记录。建议每日摄入约 2000 kcal。"
+    # 3. 汇总输出
+    lines = [format_target_report(target, user_id)]
 
-    # 统计各餐次
-    meals_summary = {}
-    for r in rows:
-        mt = r["meal_type"]
-        if mt not in meals_summary:
-            meals_summary[mt] = 0.0
-        meals_summary[mt] += r["calories"] or 0
+    if rows:
+        meals_summary = {}
+        for r in rows:
+            mt = r["meal_type"]
+            meals_summary[mt] = meals_summary.get(mt, 0.0) + (r["calories"] or 0)
 
-    lines = [f"用户 {user_id} 今日饮食汇总：", f"  总摄入: {total} kcal"]
-    for mt, cal in meals_summary.items():
-        lines.append(f"  {mt}: {round(cal, 1)} kcal")
+        lines.append(f"\n今日饮食记录：")
+        lines.append(f"  已摄入: {total} kcal")
+        for mt, cal in meals_summary.items():
+            pct = round(cal / target.adjusted_calories * 100, 1) if target.adjusted_calories > 0 else 0
+            lines.append(f"  {mt}: {round(cal, 1)} kcal ({pct}%)")
 
-    recommended = 2000
-    remaining = round(recommended - total, 1)
-    if remaining > 0:
-        lines.append(f"  推荐摄入: {recommended} kcal，剩余配额: {remaining} kcal")
+        remaining = round(target.adjusted_calories - total, 1)
+        m = target.macros
+        if remaining > 0:
+            lines.append(f"\n  目标 {target.adjusted_calories} kcal，剩余 {remaining} kcal")
+            # 按比例建议剩余宏量营养素
+            remaining_pct = remaining / target.adjusted_calories if target.adjusted_calories > 0 else 0
+            lines.append(f"  剩余建议: 蛋白 ~{round(m.protein_g * remaining_pct, 1)}g | "
+                         f"碳水 ~{round(m.carbs_g * remaining_pct, 1)}g | "
+                         f"脂肪 ~{round(m.fat_g * remaining_pct, 1)}g")
+        else:
+            lines.append(f"\n  目标 {target.adjusted_calories} kcal，已超出 {abs(remaining)} kcal")
     else:
-        lines.append(f"  推荐摄入: {recommended} kcal，已超出: {abs(remaining)} kcal")
+        lines.append(f"\n今日暂无饮食记录。建议摄入 {target.adjusted_calories} kcal。")
 
     return "\n".join(lines)
 

@@ -60,6 +60,17 @@ CREATE INDEX IF NOT EXISTS idx_meals_user_date
 
 CREATE INDEX IF NOT EXISTS idx_foods_name
     ON foods(name);
+
+CREATE TABLE IF NOT EXISTS user_health_profiles (
+    user_id TEXT PRIMARY KEY,
+    gender TEXT DEFAULT '',
+    age INTEGER DEFAULT 30,
+    height_cm REAL DEFAULT 170,
+    weight_kg REAL DEFAULT 70,
+    activity_level TEXT DEFAULT '久坐',
+    conditions TEXT DEFAULT '',
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # ============================================================
@@ -250,5 +261,88 @@ def get_food_categories() -> list[str]:
     try:
         rows = conn.execute("SELECT DISTINCT category FROM foods ORDER BY category").fetchall()
         return [r["category"] for r in rows]
+    finally:
+        conn.close()
+
+
+# ============================================================
+#  用户健康画像 CRUD
+# ============================================================
+
+def upsert_health_profile(
+    user_id: str,
+    gender: str | None = None,
+    age: int | None = None,
+    height_cm: float | None = None,
+    weight_kg: float | None = None,
+    activity_level: str | None = None,
+    conditions: str | None = None,
+) -> dict:
+    """
+    插入或更新用户健康画像。
+    只更新传入的非 None 字段，其余保持不变。
+    返回完整画像。
+    """
+    conn = get_connection()
+    now = datetime.now().isoformat()
+
+    existing = conn.execute(
+        "SELECT * FROM user_health_profiles WHERE user_id = ?", (user_id,)
+    ).fetchone()
+
+    if existing:
+        # 合并更新
+        updates = {}
+        if gender is not None:
+            updates["gender"] = gender
+        if age is not None:
+            updates["age"] = age
+        if height_cm is not None:
+            updates["height_cm"] = height_cm
+        if weight_kg is not None:
+            updates["weight_kg"] = weight_kg
+        if activity_level is not None:
+            updates["activity_level"] = activity_level
+        if conditions is not None:
+            updates["conditions"] = conditions
+        updates["updated_at"] = now
+
+        if updates:
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [user_id]
+            conn.execute(
+                f"UPDATE user_health_profiles SET {set_clause} WHERE user_id = ?",
+                values,
+            )
+    else:
+        conn.execute(
+            "INSERT INTO user_health_profiles "
+            "(user_id, gender, age, height_cm, weight_kg, activity_level, conditions, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                user_id,
+                gender or "",
+                age or 30,
+                height_cm or 170,
+                weight_kg or 70,
+                activity_level or "久坐",
+                conditions or "",
+                now,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+    return get_health_profile(user_id)
+
+
+def get_health_profile(user_id: str) -> dict | None:
+    """获取用户健康画像，不存在返回 None"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM user_health_profiles WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        return dict(row) if row else None
     finally:
         conn.close()
