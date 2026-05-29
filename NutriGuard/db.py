@@ -10,7 +10,7 @@ import sqlite3
 import os
 from datetime import datetime, date
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutriguard.db")
+DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutriguard.db"))
 
 
 def get_connection() -> sqlite3.Connection:

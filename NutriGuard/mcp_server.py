@@ -26,7 +26,7 @@ from nutrition import calculate_daily_target, format_target_report
 mcp = FastMCP("NutriGuard_Tools")
 # 链接本地的Docker 与 Redis Stack
 try:
-    redis_client = redis.Redis(host='localhost', port=6379, decode_responses=True)
+    redis_client = redis.Redis(host=os.environ.get("REDIS_HOST", "localhost"), port=6379, decode_responses=True)
     redis_client.ping()
     print("✓ [MCP Server] Redis 连接成功", file=sys.stderr)
 except Exception as e:

@@ -1,3 +1,4 @@
+import os
 import sys
 import time
 import json
@@ -21,7 +22,8 @@ from graph_brain import build_multi_agent_graph
 # ==========================================
 #   1 lifespan
 # ==========================================
-redis_client = redis.Redis(host="localhost",port=6379,decode_responses=True)
+REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+redis_client = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
 
 @asynccontextmanager
 async def lifespan(app:FastAPI):
@@ -30,7 +32,7 @@ async def lifespan(app:FastAPI):
     使用 AsyncExitStack 扁平化管理多个异步上下文，确保关机。
     """
     print("[生命周期] 正在启动API网关，底层微服务")
-    redis_client = redis.Redis(host="localhost",port=6379,decode_responses=True)
+    # redis_client 使用模块级实例（已通过 REDIS_HOST 配置）
     async with AsyncExitStack() as stack:
         try:
             
