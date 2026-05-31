@@ -184,7 +184,13 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     class ReflectionVerdict(BaseModel):
         verdict: Literal["PASS", "CORRECT", "REJECT"]
         reason: str = ""
-        risk_items: str = ""
+        risk_items: str | list[str] = ""
+
+        @staticmethod
+        def _normalize_risk(v: str | list[str]) -> str:
+            if isinstance(v, list):
+                return "; ".join(str(x) for x in v)
+            return str(v) if v else ""
 
     async def rag_reflection_node(state: AgentState):
         """
@@ -238,7 +244,9 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             response = await llm.ainvoke([SystemMessage(content=review_prompt)])
             json_str = _extract_json(str(response.content))
             verdict = ReflectionVerdict.model_validate_json(json_str)
-            print(f" [Reflection] 判定: {verdict.verdict} | {verdict.reason}")
+            # 规范化 risk_items（qwen 可能返回列表）
+            verdict.risk_items = ReflectionVerdict._normalize_risk(verdict.risk_items)
+            print(f"[Reflection] 判定: {verdict.verdict} | {verdict.reason}")
 
             if verdict.verdict == "PASS":
                 return {"next_node": "supervisor"}
@@ -246,7 +254,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             elif verdict.verdict == "CORRECT":
                 note = SystemMessage(
                     content=(
-                        f" [合规审查·修正] {verdict.reason}"
+                        f"[合规审查·修正] {verdict.reason}"
                         + (f"\n风险提示: {verdict.risk_items}" if verdict.risk_items else "")
                     ),
                     name="reflection",
@@ -260,7 +268,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 )
                 safe_msg = SystemMessage(
                     content=(
-                        " 【系统提示】经合规审查，上一条回答存在以下问题，已被拦截：\n"
+                        "【系统提示】经合规审查，上一条回答存在以下问题，已被拦截：\n"
                         f"  — {verdict.reason}\n"
                         + (f"  — 风险项: {verdict.risk_items}\n" if verdict.risk_items else "")
                         + "\n建议您：\n"
@@ -273,8 +281,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 return {"messages": delete_ops + [safe_msg], "next_node": "supervisor"}
 
         except Exception as e:
-            print(f" [Reflection 审查异常] {e}，降级放行", flush=True)
-            return {"next_node": "supervisor"}
+            print(f"[Reflection 审查异常] {e}，降级结束本轮对话", flush=True)
+            return {"next_node": "FINISH"}
 
 
     # =====================================
@@ -414,9 +422,9 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         },
     )
 
-    # RAG 路径: rag_expert → rag_reflection → memory_compressor → supervisor
+    # RAG 路径: rag_expert → rag_reflection → END（不绕回 supervisor 避免膨胀→压缩→死循环）
     workflow.add_edge("rag_expert", "rag_reflection")
-    workflow.add_edge("rag_reflection", "memory_compressor")
+    workflow.add_edge("rag_reflection", END)
 
     # Action 路径: action_expert → memory_compressor → supervisor
     workflow.add_edge("action_expert", "memory_compressor")

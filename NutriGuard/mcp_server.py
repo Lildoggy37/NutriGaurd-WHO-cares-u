@@ -67,25 +67,31 @@ async def _init_rag_engine_async():
         return
 
     _rag_init_started = True
+    t0 = time.time()
     try:
-        print("[RAG] 首次查询触发，正在加载模型...", file=sys.stderr)
+        print("[RAG-init] === 开始加载 RAG 检索引擎 ===", file=sys.stderr)
 
+        t1 = time.time()
         if os.path.isdir(BGE_MODEL_PATH):
             _embedder = await asyncio.to_thread(HuggingFaceEmbeddings, model_name=BGE_MODEL_PATH)
-            print("  [RAG] BGE Embedding 加载成功", file=sys.stderr)
+            print(f"  [RAG-init] BGE Embedding 加载完成 ({time.time()-t1:.1f}s)", file=sys.stderr)
         else:
-            print(f"  [RAG] BGE 模型路径不存在: {BGE_MODEL_PATH}", file=sys.stderr)
+            print(f"  [RAG-init] BGE 模型路径不存在: {BGE_MODEL_PATH}", file=sys.stderr)
             return
 
+        t2 = time.time()
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
+        print(f"  [RAG-init] BM25 稀疏模型就绪 ({time.time()-t2:.1f}s)", file=sys.stderr)
 
+        t3 = time.time()
         with open(CORPUS_PATH, "r", encoding="utf-8") as f:
             markdown_document = f.read()
-
         headers_to_split_on = [("##", "Chapter"), ("###", "Section")]
         markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
         docs = markdown_splitter.split_text(markdown_document)
+        print(f"  [RAG-init] 语料分块完成: {len(docs)} 块 ({time.time()-t3:.1f}s)", file=sys.stderr)
 
+        t4 = time.time()
         _vectorstore = QdrantVectorStore.from_documents(
             docs,
             embedding=_embedder,
@@ -95,18 +101,19 @@ async def _init_rag_engine_async():
             retrieval_mode="hybrid",
         )
         _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
+        print(f"  [RAG-init] Qdrant 混合索引构建完成 ({time.time()-t4:.1f}s)", file=sys.stderr)
 
+        t5 = time.time()
         if os.path.isdir(RERANKER_PATH):
-            print(f"  [RAG] 挂载 BGE-Reranker: {RERANKER_PATH}", file=sys.stderr)
             _reranker = await asyncio.to_thread(CrossEncoder, RERANKER_PATH)
         else:
-            print("  [RAG] 从 HuggingFace 加载 Reranker...", file=sys.stderr)
             _reranker = await asyncio.to_thread(CrossEncoder, "BAAI/bge-reranker-v2-m3")
+        print(f"  [RAG-init] Reranker 加载完成 ({time.time()-t5:.1f}s)", file=sys.stderr)
 
         _rag_ready = True
-        print("  [RAG] 检索引擎全量就绪！", file=sys.stderr)
+        print(f"[RAG-init] === 全量就绪，总耗时 {time.time()-t0:.1f}s ===", file=sys.stderr)
     finally:
-        _rag_init_event.set()  # 即使失败也释放所有等待协程
+        _rag_init_event.set()
 
 
 # 初始化 SQLite（轻量，无阻塞）
@@ -119,28 +126,44 @@ async def perform_rag_search(query: str, top_k: int = 3) -> str:
     内部RAG检索引擎：双路召回 + Reranker 精排（CPU 密集操作放入线程池）。
     首次调用会触发 RAG 引擎的异步延迟初始化。
     """
+    t0 = time.time()
+    print(f"[RAG-search] 收到查询: {query[:60]}...", file=sys.stderr)
+
+    t_init = time.time()
     await _init_rag_engine_async()
+    print(f"  [RAG-search] 引擎就绪确认 ({time.time()-t_init:.1f}s)", file=sys.stderr)
 
     if _retriever is None or _reranker is None:
+        print(f"  [RAG-search] 引擎不可用，返回空", file=sys.stderr)
         return ""
 
-    # A 双路召回（线程池，避免阻塞事件循环）
+    # A 双路召回
+    t_recall = time.time()
     rough_docs = await asyncio.to_thread(_retriever.invoke, query)
+    print(f"  [RAG-search] 双路召回: {len(rough_docs)} 条 ({time.time()-t_recall:.1f}s)", file=sys.stderr)
     if not rough_docs:
         return ""
 
-    # B Rerank（CPU 密集，放入线程池）
+    # B Rerank
+    t_rerank = time.time()
     sentence_pairs = [[query, doc.page_content] for doc in rough_docs]
     scores = await asyncio.to_thread(_reranker.predict, sentence_pairs)
+    print(f"  [RAG-search] Reranker 完成 ({time.time()-t_rerank:.1f}s)", file=sys.stderr)
 
     scored_docs = sorted(zip(rough_docs, scores), key=lambda x: x[1], reverse=True)
     top_docs = scored_docs[:top_k]
 
-    context_parts = []
-    for doc, score in top_docs:
-        meta = doc.metadata.get("Section", "通用营养知识")
-        context_parts.append(f"【{meta}】(相关度: {score:.2f})\n{doc.page_content}")
+    # 输出 Top-3 得分
+    for i, (doc, score) in enumerate(top_docs):
+        meta = doc.metadata.get("Chapter", "") + " / " + doc.metadata.get("Section", "")
+        snippet = doc.page_content[:60].replace("\n", " ")
+        print(f"    #{i+1} score={score:.3f} [{meta}] {snippet}...", file=sys.stderr)
 
+    context_parts = [
+        f"【{doc.metadata.get('Section', '通用营养知识')}】(相关度: {score:.2f})\n{doc.page_content}"
+        for doc, score in top_docs
+    ]
+    print(f"  [RAG-search] 总耗时 {time.time()-t0:.1f}s", file=sys.stderr)
     return "\n\n".join(context_parts)
 
 
@@ -209,7 +232,8 @@ async def get_from_cache(query: str, threshold: float = 0.85):
     if emb is None or not _redis_has_search:
         return None
     try:
-        query_vector = emb.embed_query(query)
+        t0 = time.time()
+        query_vector = await asyncio.to_thread(emb.embed_query, query)
         query_vector_bytes = np.array(query_vector, dtype=np.float32).tobytes()
 
         q = Query(f"*=>[KNN 1 @query_vector $vec AS score]")\
@@ -224,10 +248,10 @@ async def get_from_cache(query: str, threshold: float = 0.85):
             similarity = 1 - distance
 
             if similarity >= threshold:
-                print(f"[Cache 命中] 相似度: {similarity:.4f} | 匹配历史提问: '{results.docs[0].query_text}'", file=sys.stderr)
+                print(f"[Cache 命中] sim={similarity:.3f} | 耗时 {time.time()-t0:.1f}s | '{results.docs[0].query_text}'", file=sys.stderr)
                 return results.docs[0].answer
     except Exception as e:
-        print(f"⚠ [Cache 查询异常] {e}", file=sys.stderr)
+        print(f"[Cache 查询异常] {e}", file=sys.stderr)
 
     return None
 
@@ -239,7 +263,7 @@ async def save_to_cache(query: str, answer: str):
     if emb is None or not _redis_has_search:
         return
     try:
-        query_vector = emb.embed_query(query)
+        query_vector = await asyncio.to_thread(emb.embed_query, query)
         query_vector_bytes = np.array(query_vector, dtype=np.float32).tobytes()
 
         cache_key = f"cache:{hash(query)}"
@@ -250,7 +274,7 @@ async def save_to_cache(query: str, answer: str):
         })
         redis_client.expire(cache_key, 86400)
     except Exception as e:
-        print(f"⚠ [Cache 写入异常] {e}", file=sys.stderr)
+        print(f"[Cache 写入异常] {e}", file=sys.stderr)
 
 
 # ============================

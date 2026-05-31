@@ -217,11 +217,12 @@ async def chat_stream_endpoint(request: ChatRequest):
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
                 kind = event["event"]
 
-                # LLM 打字机效果 — 仅推送给用户可见的 agent 节点
-                # 过滤 supervisor/reflection 的内部 JSON，只留对话内容
+                # LLM 打字机效果 — 黑名单模式：默认放行，只排除 supervisor/reflection
+                # create_agent 内部子节点（"agent"/"tools"等）均会正常流式输出
                 if kind == "on_chat_model_stream":
                     node_name = event.get("metadata", {}).get("langgraph_node", "")
-                    if node_name in ("rag_expert", "action_expert", "slot_filler"):
+                    HIDDEN_NODES = {"supervisor", "rag_reflection", "memory_compressor"}
+                    if node_name not in HIDDEN_NODES:
                         chunk = event["data"]["chunk"]
                         if hasattr(chunk, "content") and chunk.content is not None:
                             yield f"data: {json.dumps({'type': 'text', 'content': chunk.content}, ensure_ascii=False)}\n\n"
