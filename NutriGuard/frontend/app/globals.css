@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 48 100% 97%;
+    --foreground: 140 30% 15%;
+    --card: 48 80% 95%;
+    --card-foreground: 140 30% 15%;
+    --primary: 142 70% 35%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 45 93% 47%;
+    --accent-foreground: 48 100% 97%;
+    --muted: 140 30% 90%;
+    --muted-foreground: 140 15% 40%;
+    --border: 140 30% 80%;
+    --ring: 142 70% 35%;
+    --radius: 1rem;
+  }
+
+  body {
+    @apply bg-[#fefce8] text-leaf-900 antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-white/70 backdrop-blur-sm border border-leaf-200/50 shadow-sm;
+  }
+
+  .solar-gradient {
+    background: linear-gradient(135deg, #fef3c7 0%, #dcfce7 50%, #f0fdf4 100%);
+  }
+
+  .leaf-divider {
+    @apply h-px w-full;
+    background: linear-gradient(90deg, transparent, #86efac, transparent);
+  }
+
+  .message-enter {
+    animation: slideUp 0.4s ease-out, fadeIn 0.3s ease-out;
+  }
+}
+
+/* Custom scrollbar */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #bbf7d0;
+  border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #86efac;
+}
+
+/* Blinking cursor for streaming text */
+.streaming-cursor::after {
+  content: "▍";
+  animation: pulseSoft 1s ease-in-out infinite;
+  color: #22c55e;
+}
