@@ -201,7 +201,63 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             return {"messages": [AIMessage(content=fallback)], "next_node": "FINISH"}
 
     # =====================================
-    #    4.5 Reflection —— RAG 回答合规审查
+    #    4.5 Preprocess —— 查询预处理（纠错+改写+意图澄清）
+    # =====================================
+    PREPROCESS_PROMPT = """你是医疗健康查询预处理助手。对用户的原始输入做以下处理：
+
+    1. **纠错**：修正常见错别字（如"唐尿病"→"糖尿病"，"同风"→"痛风"，"升糖"→"升糖指数"）
+    2. **同义词展开**：口语化表达转为标准术语（如"尿酸高"→"高尿酸血症/痛风"，"三高"→"高血压/高血脂/高血糖"）
+    3. **指代消解**：如果用户说"这个""那个"，结合上下文明确指代对象
+    4. **意图澄清**：模糊查询补充关键信息（如"吃啥好"→"适合食用什么类型的食物"）
+
+    **噪声控制规则**：
+    - 不要添加用户没提到的疾病、食物或个人信息
+    - 不要猜测用户的健康状况
+    - 改写后长度控制在 80 字以内
+    - 忠实于用户原意，只做标准化不改含义
+
+    输出格式：只输出改写后的问题文本，不要附加任何解释或 JSON。"""
+
+    async def preprocess_node(state: AgentState):
+        messages = state["messages"]
+        # 找到最后一条 HumanMessage
+        last_user_msg = None
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                last_user_msg = m
+                break
+
+        if last_user_msg is None:
+            return {"next_node": "supervisor"}
+
+        raw = str(last_user_msg.content).strip()
+        # 太短或明显不需要改写 → 跳过
+        if len(raw) <= 3:
+            return {"next_node": "supervisor"}
+
+        print(f"[Preprocess] 原始输入: {raw[:60]}...", flush=True)
+        try:
+            response = await llm.ainvoke([
+                SystemMessage(content=PREPROCESS_PROMPT),
+                HumanMessage(content=f"用户原始输入：{raw}"),
+            ])
+            rewritten = str(response.content).strip()
+
+            if rewritten and rewritten != raw:
+                print(f"[Preprocess] 改写结果: {rewritten[:80]}...", flush=True)
+                return {
+                    "messages": [
+                        SystemMessage(content=f"[查询改写] {rewritten}", name="preprocess")
+                    ],
+                    "next_node": "supervisor",
+                }
+        except Exception as e:
+            print(f"[Preprocess] 改写失败: {e}，直接放行", flush=True)
+
+        return {"next_node": "supervisor"}
+
+    # =====================================
+    #    4.6 Reflection —— RAG 回答合规审查
     # =====================================
     class ReflectionVerdict(BaseModel):
         verdict: Literal["PASS", "CORRECT", "REJECT"]
@@ -434,6 +490,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     workflow = StateGraph(AgentState)
 
     # register all node
+    workflow.add_node("preprocess", preprocess_node)
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("rag_expert", rag_expert_node)
     workflow.add_node("rag_reflection", rag_reflection_node)
@@ -441,8 +498,9 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     workflow.add_node("slot_filler", slot_filler_node)
     workflow.add_node("memory_compressor", memory_compressor_node)
 
-    # 其实结点
-    workflow.add_edge(START, "supervisor")
+    # START → preprocess → supervisor
+    workflow.add_edge(START, "preprocess")
+    workflow.add_edge("preprocess", "supervisor")
 
     # conditional_edges
     workflow.add_conditional_edges(

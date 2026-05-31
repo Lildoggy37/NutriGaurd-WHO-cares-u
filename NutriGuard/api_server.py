@@ -234,7 +234,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                 elif kind == "on_chain_start":
                     node_name = event.get("name", "")
                     STATUS_NODES = {
-                        "supervisor", "rag_expert", "rag_reflection",
+                        "preprocess", "supervisor", "rag_expert", "rag_reflection",
                         "action_expert", "slot_filler", "memory_compressor",
                     }
                     if node_name in STATUS_NODES:

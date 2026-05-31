@@ -63,7 +63,7 @@ class TestGraphTopology:
         """所有核心节点均已注册"""
         node_names = set(graph.get_graph().nodes.keys())
         expected = {
-            "supervisor", "rag_expert", "rag_reflection",
+            "preprocess", "supervisor", "rag_expert", "rag_reflection",
             "action_expert", "slot_filler", "memory_compressor",
             "__start__", "__end__",
         }
@@ -76,12 +76,14 @@ class TestGraphTopology:
         compiled = graph.get_graph()
         assert compiled is not None
 
-    def test_start_edges_to_supervisor(self, graph):
-        """START → supervisor 是第一条边"""
+    def test_start_edges_through_preprocess(self, graph):
+        """START → preprocess → supervisor"""
         edges = graph.get_graph().edges
         start_edges = [e for e in edges if e[0] == "__start__"]
         assert len(start_edges) > 0
-        assert any(e[1] == "supervisor" for e in start_edges), "START 应连接到 supervisor"
+        assert any(e[1] == "preprocess" for e in start_edges), "START 应连接到 preprocess"
+        preprocess_edges = [e for e in edges if e[0] == "preprocess"]
+        assert any(e[1] == "supervisor" for e in preprocess_edges), "preprocess 应连接到 supervisor"
 
     def test_conditional_edges_from_supervisor(self, graph):
         """supervisor 的条件边包含所有 4 个目标"""
