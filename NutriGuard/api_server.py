@@ -224,6 +224,9 @@ async def chat_stream_endpoint(request: ChatRequest):
                     if node_name in STATUS_NODES:
                         yield f"data: {json.dumps({'type': 'status', 'content': f'🔍 节点 [{node_name}] 开始思考...'}, ensure_ascii=False)}\n\n"
 
+                elif kind == "on_chain_end":
+                    pass  # slot_filler 已改为 LLM 生成，由 on_chat_model_stream 处理
+
         except Exception as e:
             import traceback
             print(f"[流式推送异常] {e}")

@@ -126,10 +126,29 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             error_msg = SystemMessage(content="【系统提示】抱歉，膳食日志系统暂时不可用，记录失败。", name="action_expert")
             return {"messages": [error_msg], "next_node": "supervisor"}
 
+    SLOT_FILLER_PROMPT = """你是一个细心的健康管家。用户刚才说的话信息不完整，你需要追问以补全关键信息。
+
+    追问规则：
+    - 根据对话历史，判断用户缺失了什么关键信息（食物分量、食物种类、个人信息等）
+    - 提出 1-2 个具体、简洁的追问，帮助后续准确处理
+    - 不要重复用户已经说过的信息
+    - 用友好的口吻，不要让用户感到被审问
+
+    例如：
+    - 用户说"帮我记早饭" → 追问"请问早餐具体吃了什么？每样大概多少分量呢？"
+    - 用户说"帮我查一下饮食" → 追问"请问您想了解哪方面的饮食信息？比如特定疾病（糖尿病/痛风）的禁忌，还是日常营养搭配？"
+    - 用户说"我身高175" → 追问"好的，请问您的体重是多少呢？另外有已知的健康状况吗（如糖尿病、高血压）？" """
+
     async def slot_filler_node(state: AgentState):
-        print("🗣️ [Slot Filler] 发现信息缺失，正在追问...")
-        response = "为了给您更精准的建议，请问您刚才提到的食物具体分量是多少呢？（例如：一小碗、200g）"
-        return {"messages": [SystemMessage(content=response, name="slot_filler")], "next_node": "FINISH"}
+        print("[Slot Filler] 正在生成追问...", flush=True)
+        messages = [SystemMessage(content=SLOT_FILLER_PROMPT)] + state["messages"]
+        try:
+            response = await llm.ainvoke(messages)
+            return {"messages": [response], "next_node": "FINISH"}
+        except Exception as e:
+            print(f"[Slot Filler 异常] {e}", flush=True)
+            fallback = "请提供更多细节，我可以更准确地帮助您。"
+            return {"messages": [AIMessage(content=fallback)], "next_node": "FINISH"}
 
     # =====================================
     #    4.5 Reflection —— RAG 回答合规审查
