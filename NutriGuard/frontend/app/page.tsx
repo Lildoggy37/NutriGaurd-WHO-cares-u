@@ -24,8 +24,20 @@ const EMPTY_PROFILE = {
   conditions: [] as string[],
 };
 
+function getOrCreateSessionId(): string {
+  if (typeof window === "undefined") return "server";
+  const key = "nutriguard_session_id";
+  let sid = localStorage.getItem(key);
+  if (!sid) {
+    sid = crypto.randomUUID();
+    localStorage.setItem(key, sid);
+  }
+  return sid;
+}
+
 export default function Home() {
-  const { messages, currentStatus, isStreaming, sendMessage } = useSSEChat("nutriguard_user");
+  const [sessionId] = useState(getOrCreateSessionId);
+  const { messages, currentStatus, isStreaming, sendMessage } = useSSEChat(sessionId);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
   return (

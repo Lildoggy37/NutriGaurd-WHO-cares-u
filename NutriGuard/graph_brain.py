@@ -1,8 +1,9 @@
 import operator
 import json
 import os
+import re
 from typing import Annotated, Sequence, TypedDict, Literal, Dict
-from pydantic import BaseModel,Field
+from pydantic import BaseModel, Field
 
 from langchain_core.messages import (
     BaseMessage, HumanMessage, SystemMessage, RemoveMessage, AIMessage, ToolMessage,
@@ -58,35 +59,48 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    3. Supervisor
     # =====================================
     class RouteDecision(BaseModel):
-        next_node: Literal["rag_expert", "action_expert", "slot_filler", "FINISH"] = Field(description="下一步流转节点")
-        reason: str = Field(description="路由决策的原因") # 大模型思考过程
+        next_node: Literal["rag_expert", "action_expert", "slot_filler", "FINISH"]
+        reason: str = ""
 
-    supervisor_llm = llm.with_structured_output(RouteDecision)
+    # JSON 提取工具：qwen 通过 compatible-mode 端点不保证 structured_output 稳定，
+    # 改用 prompt 要求 JSON → 正则提取 → Pydantic 校验
+    def _extract_json(text: str) -> str:
+        m = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+        if m:
+            return m.group(1).strip()
+        m = re.search(r'\{[\s\S]*\}', text)
+        if m:
+            return m.group(0).strip()
+        return text.strip()
 
-    async def supervisor_node(state:AgentState):
+    ROUTE_PROMPT = """你是一个高级医疗健康分发路由。请根据对话历史决定下一步操作，并输出 JSON。
+
+    路由规则：
+    - 用户在询问疾病禁忌、指南知识 → rag_expert
+    - 用户想记录饮食、计算热量、生成采购清单 → action_expert
+    - 用户的话信息不全（如只说"记早饭"但没说什么食物）→ slot_filler
+    - 问题已经彻底解答完毕、或简单闲聊问候 → FINISH
+
+    请严格按以下 JSON 格式输出，不要附加任何其他文字：
+    {"next_node": "<rag_expert|action_expert|slot_filler|FINISH>", "reason": "你的路由理由"}"""
+
+    async def supervisor_node(state: AgentState):
         print("[Supervisor] 正在审视意图...")
-        # 将user_profile转换为字符串给llm
-        profile_str = json.dumps(state.get("user_profile",{}),ensure_ascii=False)
+        profile_str = json.dumps(state.get("user_profile", {}), ensure_ascii=False)
 
-        sys_prompt = f"""你是一个高级医疗健康分发路由。
-        当前用户的已知健康画像：{profile_str}
-        
-        请根据历史对话，决定下一步操作：
-        - 如果用户在询问疾病禁忌、指南知识，选 'rag_expert'
-        - 如果用户想记录今天吃了什么、算热量，选 'action_expert'
-        - 如果用户的话没说完（例如说“帮我记下早饭”但没说吃了啥），选 'slot_filler'
-        - 如果问题已经彻底解答完毕，选 'FINISH'
-        """
+        sys_prompt = ROUTE_PROMPT + f"\n\n当前用户已知健康画像：{profile_str}"
 
         messages = [SystemMessage(content=sys_prompt)] + state["messages"]
 
         try:
-            decision = await supervisor_llm.ainvoke(messages)
-            print(f"🚦 [路由分发] 决定去向: {decision.next_node} | 理由: {decision.reason}")
+            response = await llm.ainvoke(messages)
+            json_str = _extract_json(str(response.content))
+            decision = RouteDecision.model_validate_json(json_str)
+            print(f"[路由分发] 决定去向: {decision.next_node} | 理由: {decision.reason}")
             return {"next_node": decision.next_node}
         except Exception as e:
-            print(f"🧨 [Supervisor 崩溃兜底] 路由解析失败: {e}。触发安全降级机制。")
-            return {"next_node": "FINISH"} # 路由失败时强制切断，避免在图中死循环
+            print(f"[Supervisor 兜底] 路由解析失败: {e}，强制 FINISH")
+            return {"next_node": "FINISH"}
 
     # =====================================
     #    4. worker node
@@ -121,18 +135,16 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    4.5 Reflection —— RAG 回答合规审查
     # =====================================
     class ReflectionVerdict(BaseModel):
-        verdict: Literal["PASS", "CORRECT", "REJECT"] = Field(description="审查判定结果")
-        reason: str = Field(description="判定理由，须引用证据中的具体矛盾点")
-        risk_items: str = Field(default="", description="发现的风险点，若无不填")
-
-    reflection_llm = llm.with_structured_output(ReflectionVerdict)
+        verdict: Literal["PASS", "CORRECT", "REJECT"]
+        reason: str = ""
+        risk_items: str = ""
 
     async def rag_reflection_node(state: AgentState):
         """
         RAG 回答的事后合规审查。
         从消息历史中提取检索证据和 AI 回答，用独立 LLM 审查幻觉/安全/完整性。
         """
-        print(" [Reflection] 正在审查 RAG 回答的合规性...")
+        print("[Reflection] 正在审查 RAG 回答的合规性...")
         messages = state["messages"]
 
         # --- 找到最后一条 AI 回答 + 所有工具检索结果 ---
@@ -141,7 +153,6 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         for m in messages:
             if isinstance(m, AIMessage):
-                # 过滤掉 tool_call 的中间 AIMessage，只保留最终回答
                 tc = getattr(m, "tool_calls", None)
                 if not tc:
                     last_ai = m
@@ -149,7 +160,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 evidence_parts.append(str(m.content)[:800])
 
         if last_ai is None:
-            print(" [Reflection] 未找到 AI 回答，跳过审查", flush=True)
+            print("[Reflection] 未找到 AI 回答，跳过审查", flush=True)
             return {"next_node": "supervisor"}
 
         answer_text = str(last_ai.content)[:2000]
@@ -165,19 +176,21 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         【审查标准】
         1. 幻觉检测：回答中每条营养/医学声明是否在证据中有出处？引用是否准确？
-        2. 安全合规：是否包含危险饮食建议（如极端断食、滥用药物）？是否缺少「仅供参考，请咨询医生」类声明？
+        2. 安全合规：是否包含危险饮食建议？是否缺少「仅供参考，请咨询医生」类声明？
         3. 完整性：是否正面、直接地回答了用户问题？
 
         【判定规则】
         - PASS：安全、准确、完整，直接放行
-        - CORRECT：有小瑕疵（如措辞不够严谨、缺少免责声明），附修正建议后放行
+        - CORRECT：有小瑕疵，附修正建议后放行
         - REJECT：存在虚构数据、危险建议、或与证据严重矛盾，必须拦截
-        """
+
+        请严格按以下 JSON 格式输出，不要附加任何其他文字：
+        {{"verdict": "<PASS|CORRECT|REJECT>", "reason": "判定理由", "risk_items": "风险点（若无则留空）"}}"""
 
         try:
-            verdict: ReflectionVerdict = await reflection_llm.ainvoke(
-                [SystemMessage(content=review_prompt)]
-            )
+            response = await llm.ainvoke([SystemMessage(content=review_prompt)])
+            json_str = _extract_json(str(response.content))
+            verdict = ReflectionVerdict.model_validate_json(json_str)
             print(f" [Reflection] 判定: {verdict.verdict} | {verdict.reason}")
 
             if verdict.verdict == "PASS":

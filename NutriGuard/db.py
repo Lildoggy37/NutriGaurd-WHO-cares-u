@@ -315,6 +315,7 @@ def upsert_health_profile(
                 values,
             )
     else:
+        # 只填入用户明确提供的字段，其余留空（避免幻觉补全）
         conn.execute(
             "INSERT INTO user_health_profiles "
             "(user_id, gender, age, height_cm, weight_kg, activity_level, conditions, updated_at) "
@@ -322,10 +323,10 @@ def upsert_health_profile(
             (
                 user_id,
                 gender or "",
-                age or 30,
-                height_cm or 170,
-                weight_kg or 70,
-                activity_level or "久坐",
+                age,           # None → NULL，不会变成 30
+                height_cm,     # None → NULL，不会变成 170
+                weight_kg,     # None → NULL，不会变成 70
+                activity_level or "",
                 conditions or "",
                 now,
             ),
