@@ -59,7 +59,9 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    3. Supervisor
     # =====================================
     class RouteDecision(BaseModel):
-        next_node: Literal["rag_expert", "action_expert", "slot_filler", "FINISH"]
+        next_node: Literal["rag_expert", "action_expert", "slot_filler", "FINISH"] = Field(
+        alias="route"   # 同时接受 "route" 字段名
+        )
         reason: str = ""
 
     # JSON 提取工具：qwen 通过 compatible-mode 端点不保证 structured_output 稳定，
