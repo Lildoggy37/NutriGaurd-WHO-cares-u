@@ -82,36 +82,58 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     - 用户想记录饮食、计算热量、更新健康信息、生成采购清单 → action_expert
     - 用户的话信息不全 → slot_filler
     - 以下情况选 FINISH：
-      * AI 刚完成一次操作且已确认结果，用户在等待下一步指令
-      * AI 的回复是确认/追问/建议，且对话末尾没有新的用户消息
-      * 用户明确表示满意或说再见
+    * AI 刚完成一次操作且已确认结果，用户在等待下一步指令
+    * AI 的回复是确认/追问/建议，且对话末尾没有新的用户消息
+    * 用户明确表示满意或说再见
 
-    重要：不要根据 AI 回复中出现的"帮您记录""帮您查看""推荐"等字样判断为需要进一步操作。这些是 AI 的提问，不是用户的指令。只有当用户显式说出操作意图时才路由到对应节点。"""
+    重要：不要根据 AI 回复中出现的"帮您记录""帮您查看""推荐"等字样判断为需要进一步操作。这些是 AI 的提问，不是用户的指令。只有当用户显式说出操作意图时才路由到对应节点。
+
+    【输出格式】严格按以下 JSON 输出，不得有任何其他文字、markdown、代码块：
+    {"route": "rag_expert", "reason": "用户询问了营养知识"}
+
+    route 只能是以下四个值之一：rag_expert / action_expert / slot_filler / FINISH"""
 
     async def supervisor_node(state: AgentState):
         print("[Supervisor] 正在审视意图...")
 
-        # 只取最近的用户消息 + AI 回复，避免旧消息干扰
-        recent = []
-        for m in reversed(state["messages"]):
-            recent.insert(0, {"type": m.type, "content": str(m.content)[:200]})
-            if len(recent) >= 4:
-                break
+        messages = state["messages"]
+        last_msg = messages[-1] if messages else None
+
+        # 压缩后终止：检测 memory_summary → 直接结束当前轮次
+        if last_msg and getattr(last_msg, "name", "") == "memory_summary":
+            print("[Supervisor] 检测到压缩摘要消息，本轮结束")
+            return {"next_node": "FINISH"}
+
+        # 终止信号：最后一条是完整的 AI 回答（无 tool_calls）→ 结束
+        last_ai = None
+        for m in reversed(messages):
+            if isinstance(m, AIMessage):
+                if not getattr(m, "tool_calls", None):
+                    last_ai = m
+                    break
+        if last_ai and not any(
+            isinstance(m, HumanMessage) for m in messages[-3:]
+        ):
+            print("[Supervisor] AI 已回答且无新用户消息，本轮结束")
+            return {"next_node": "FINISH"}
+
+        # 过滤 ToolMessage / tool_calls，构造干净的 LLM 输入
+        clean = []
+        for m in messages:
+            if isinstance(m, ToolMessage):
+                continue
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                continue
+            if isinstance(m, AIMessage) and clean and isinstance(clean[-1], AIMessage):
+                continue
+            clean.append(m)
 
         profile_str = json.dumps(state.get("user_profile", {}), ensure_ascii=False)
-        context = "\n".join([f"[{r['type']}] {r['content']}" for r in recent])
-
-        sys_prompt = (
-            ROUTE_PROMPT
-            + f"\n当前健康画像：{profile_str}"
-            + f"\n最近对话：\n{context}"
-            + "\n\n根据以上信息，输出 JSON 路由决策。"
-        )
-
-        messages = [SystemMessage(content=sys_prompt)]   # 不带 state messages，只用摘要
+        sys_prompt = ROUTE_PROMPT + f"\n\n当前用户已知健康画像：{profile_str}"
+        llm_input = [SystemMessage(content=sys_prompt)] + clean
 
         try:
-            response = await llm.ainvoke(messages)
+            response = await llm.ainvoke(llm_input)
             raw = str(response.content) if response.content else ""
             if not raw.strip():
                 raise ValueError("LLM returned empty content")
@@ -295,7 +317,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         # 压缩阈值
         if len(messages) <= 10:
-            return {"next_node":"supervisor"}
+            return {"next_node":"FINISH"}
         
         print(f" [Memory Compressor] 警报：上下文已达 {len(messages)} 条，触发滑动窗口压缩！")
 
@@ -372,12 +394,24 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 name="memory_summary",
             )
 
+            # 保留终止信号：最后一条非工具调用的 AIMessage
+            last_complete_ai = None
+            for m in reversed(messages):
+                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
+                    last_complete_ai = m
+                    break
+
             # 确保最后用户消息不被误删
             return_messages = delete_ops + [recovery]
             lost_human = last_human and last_human.id in all_delete_ids
             if lost_human:
                 return_messages.append(
                     HumanMessage(content=str(last_human.content))
+                )
+            # 保留完整 AI 回答作为终止信号，让 supervisor 识别"已完成"
+            if last_complete_ai and last_complete_ai.id in all_delete_ids:
+                return_messages.append(
+                    AIMessage(content=str(last_complete_ai.content))
                 )
 
             print(
@@ -388,11 +422,11 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             return {
                 "messages": return_messages,
                 "user_profile": current_profile,
-                "next_node": "supervisor",
+                "next_node": "FINISH",  # 压缩后直接结束，避免再回 supervisor 死循环
             }
         except Exception as e:
             print(f"[压缩节点异常] {e}，跳过本次压缩")
-            return {"next_node": "supervisor"}
+            return {"next_node": "FINISH"}
 
     # =====================================
     #    5. draw graph
@@ -429,7 +463,14 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     # Action 路径: action_expert → memory_compressor → supervisor
     workflow.add_edge("action_expert", "memory_compressor")
 
-    workflow.add_edge("memory_compressor", "supervisor")
+    workflow.add_conditional_edges(
+    "memory_compressor",
+    lambda state: state["next_node"],
+    {
+        "supervisor": "supervisor",
+        "FINISH": END,
+    },
+)
 
     if checkpointer is None:
         checkpointer = MemorySaver()
