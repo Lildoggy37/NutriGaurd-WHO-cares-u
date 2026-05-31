@@ -155,33 +155,52 @@ def perform_rag_search(query: str, top_k: int = 3) -> str:
 #   3. Redis 语义缓存
 # ============================
 INDEX_NAME = "idx:semantic_cache"
+_redis_has_search = False  # RediSearch 模块是否可用
 
-def setup_redis_index():
-    """
-    在Redis 创建向量索引 if not exist
-    """
+
+def _check_redis_capabilities():
+    """探测 Redis 是否安装了 RediSearch 模块"""
+    global _redis_has_search
     if redis_client is None:
+        return
+    try:
+        modules = redis_client.execute_command("MODULE", "LIST")
+        _redis_has_search = any("search" in m[1].lower() for m in modules)
+    except Exception:
+        _redis_has_search = False
+
+    if _redis_has_search:
+        print("  [MCP Server] Redis Stack 检测成功，语义缓存已启用", file=sys.stderr)
+    else:
+        print("  [MCP Server] 标准 Redis 无 RediSearch，语义缓存自动禁用", file=sys.stderr)
+
+
+def _setup_redis_index():
+    """在 Redis Stack 中创建向量索引"""
+    if not _redis_has_search:
         return
     try:
         redis_client.ft(INDEX_NAME).info()
     except Exception:
         try:
-            print("🧱 正在 Redis 中初始化 Vector Index...", file=sys.stderr)
+            print("  [MCP Server] 正在创建 Redis 向量索引...", file=sys.stderr)
             schema = (
                 TextField("query_text"),
                 TextField("answer"),
                 VectorField("query_vector", "FLAT", {
                     "TYPE": "FLOAT32",
                     "DIM": VECTOR_DIM,
-                    "DISTANCE_METRIC": "COSINE"
-                })
+                    "DISTANCE_METRIC": "COSINE",
+                }),
             )
             definition = IndexDefinition(prefix=["cache:"], index_type=IndexType.HASH)
             redis_client.ft(INDEX_NAME).create_index(fields=schema, definition=definition)
         except Exception as e:
-            print(f"⚠ [MCP Server] Redis 索引初始化失败（可能需要 Redis Stack 而非普通 Redis）: {e}", file=sys.stderr)
+            print(f"  [MCP Server] Redis 索引创建失败: {e}", file=sys.stderr)
 
-setup_redis_index()
+
+_check_redis_capabilities()
+_setup_redis_index()
 
 def _ensure_embedder():
     """确保 embedding 模型已加载（用于缓存功能）"""
@@ -195,7 +214,7 @@ def get_from_cache(query: str, threshold: float = 0.85):
     从Redis查询语义缓存（需要 _embedder + redis_client 均可用）
     """
     emb = _ensure_embedder()
-    if emb is None or redis_client is None:
+    if emb is None or not _redis_has_search:
         return None
     try:
         query_vector = emb.embed_query(query)
@@ -225,7 +244,7 @@ def save_to_cache(query: str, answer: str):
     将新问题和答案写入 Redis 缓存，24h过期（需要 _embedder + redis_client 均可用）
     """
     emb = _ensure_embedder()
-    if emb is None or redis_client is None:
+    if emb is None or not _redis_has_search:
         return
     try:
         query_vector = emb.embed_query(query)
