@@ -2,6 +2,7 @@ import sys
 import json
 import time
 import os
+import asyncio
 import numpy as np
 import redis
 from redis.commands.search.field import TextField, VectorField
@@ -49,37 +50,35 @@ _vectorstore = None
 _retriever = None
 _reranker = None
 _rag_ready = False
-_rag_init_lock = False
+_rag_init_event = asyncio.Event()  # 替换布尔锁：并发协程可以等待
+_rag_init_started = False
 
 
-def _init_rag_engine():
+async def _init_rag_engine_async():
     """
-    延迟初始化 RAG 检索引擎（首次查询时触发）。
-    避免模块导入时阻塞 MCP stdio 握手，防止 lifespan 启动超时。
+    异步版延迟初始化。首次调用触发加载，后续并发协程等待同一初始化完成。
     """
-    global _embedder, _vectorstore, _retriever, _reranker, _rag_ready, _rag_init_lock
+    global _embedder, _vectorstore, _retriever, _reranker, _rag_ready, _rag_init_started
 
     if _rag_ready:
         return
-    if _rag_init_lock:
-        return  # 另一个并发请求正在初始化
-    _rag_init_lock = True
+    if _rag_init_started:
+        await asyncio.wait_for(_rag_init_event.wait(), timeout=120.0)
+        return
 
+    _rag_init_started = True
     try:
         print("[RAG] 首次查询触发，正在加载模型...", file=sys.stderr)
 
-        # 1. Embedding 模型
         if os.path.isdir(BGE_MODEL_PATH):
-            _embedder = HuggingFaceEmbeddings(model_name=BGE_MODEL_PATH)
-            print("  [RAG] BGE Embedding 模型加载成功", file=sys.stderr)
+            _embedder = await asyncio.to_thread(HuggingFaceEmbeddings, model_name=BGE_MODEL_PATH)
+            print("  [RAG] BGE Embedding 加载成功", file=sys.stderr)
         else:
             print(f"  [RAG] BGE 模型路径不存在: {BGE_MODEL_PATH}", file=sys.stderr)
             return
 
-        # 2. 稀疏检索模型
         sparse_embeddings = FastEmbedSparse(model_name="Qdrant/bm25")
 
-        # 3. 语料分块
         with open(CORPUS_PATH, "r", encoding="utf-8") as f:
             markdown_document = f.read()
 
@@ -87,7 +86,6 @@ def _init_rag_engine():
         markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
         docs = markdown_splitter.split_text(markdown_document)
 
-        # 4. Qdrant 混合索引
         _vectorstore = QdrantVectorStore.from_documents(
             docs,
             embedding=_embedder,
@@ -98,18 +96,17 @@ def _init_rag_engine():
         )
         _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
 
-        # 5. Reranker
         if os.path.isdir(RERANKER_PATH):
             print(f"  [RAG] 挂载 BGE-Reranker: {RERANKER_PATH}", file=sys.stderr)
-            _reranker = CrossEncoder(RERANKER_PATH)
+            _reranker = await asyncio.to_thread(CrossEncoder, RERANKER_PATH)
         else:
             print("  [RAG] 从 HuggingFace 加载 Reranker...", file=sys.stderr)
-            _reranker = CrossEncoder("BAAI/bge-reranker-v2-m3")
+            _reranker = await asyncio.to_thread(CrossEncoder, "BAAI/bge-reranker-v2-m3")
 
         _rag_ready = True
         print("  [RAG] 检索引擎全量就绪！", file=sys.stderr)
     finally:
-        _rag_init_lock = False
+        _rag_init_event.set()  # 即使失败也释放所有等待协程
 
 
 # 初始化 SQLite（轻量，无阻塞）
@@ -117,32 +114,28 @@ init_db()
 print("[MCP Server] SQLite 数据库就绪（RAG 引擎将在首次查询时延迟加载）", file=sys.stderr)
 
 
-def perform_rag_search(query: str, top_k: int = 3) -> str:
+async def perform_rag_search(query: str, top_k: int = 3) -> str:
     """
-    内部RAG检索引擎：双路召回 + Reranker 精排。
-    若模型未就绪则返回空字符串，由调用方降级处理。
-    首次调用会触发 RAG 引擎的延迟初始化。
+    内部RAG检索引擎：双路召回 + Reranker 精排（CPU 密集操作放入线程池）。
+    首次调用会触发 RAG 引擎的异步延迟初始化。
     """
-    if not _rag_ready:
-        _init_rag_engine()
+    await _init_rag_engine_async()
 
     if _retriever is None or _reranker is None:
         return ""
 
-    # A 双路召回
-    rough_docs = _retriever.invoke(query)
+    # A 双路召回（线程池，避免阻塞事件循环）
+    rough_docs = await asyncio.to_thread(_retriever.invoke, query)
     if not rough_docs:
         return ""
 
-    # B Rerank
+    # B Rerank（CPU 密集，放入线程池）
     sentence_pairs = [[query, doc.page_content] for doc in rough_docs]
-    scores = _reranker.predict(sentence_pairs)
+    scores = await asyncio.to_thread(_reranker.predict, sentence_pairs)
 
-    scored_docs = list(zip(rough_docs, scores))
-    scored_docs.sort(key=lambda x: x[1], reverse=True)
+    scored_docs = sorted(zip(rough_docs, scores), key=lambda x: x[1], reverse=True)
     top_docs = scored_docs[:top_k]
 
-    # 组装为Context
     context_parts = []
     for doc, score in top_docs:
         meta = doc.metadata.get("Section", "通用营养知识")
@@ -202,18 +195,17 @@ def _setup_redis_index():
 _check_redis_capabilities()
 _setup_redis_index()
 
-def _ensure_embedder():
+async def _ensure_embedder():
     """确保 embedding 模型已加载（用于缓存功能）"""
-    if not _rag_ready and not _rag_init_lock:
-        _init_rag_engine()
+    await _init_rag_engine_async()
     return _embedder
 
 
-def get_from_cache(query: str, threshold: float = 0.85):
+async def get_from_cache(query: str, threshold: float = 0.85):
     """
     从Redis查询语义缓存（需要 _embedder + redis_client 均可用）
     """
-    emb = _ensure_embedder()
+    emb = await _ensure_embedder()
     if emb is None or not _redis_has_search:
         return None
     try:
@@ -239,11 +231,11 @@ def get_from_cache(query: str, threshold: float = 0.85):
 
     return None
 
-def save_to_cache(query: str, answer: str):
+async def save_to_cache(query: str, answer: str):
     """
     将新问题和答案写入 Redis 缓存，24h过期（需要 _embedder + redis_client 均可用）
     """
-    emb = _ensure_embedder()
+    emb = await _ensure_embedder()
     if emb is None or not _redis_has_search:
         return
     try:
@@ -270,7 +262,7 @@ async def search_diet_guidelines(query:str)->str:
     专门用于查询《中国居民膳食指南》和普适性营养原则。
     """
     print(f" [MCP 检索] 正在查阅膳食指南: {query}", file=sys.stderr)
-    context = perform_rag_search(query)
+    context = await perform_rag_search(query)
     if not context:
         return "抱歉，本地知识库暂时不可用，请稍后再试。"
     return f"【膳食指南检索结果】\n{context}"
@@ -281,7 +273,7 @@ async def check_food_gi(food_name: str) -> str:
     查询特定食物的升糖指数(GI)和血糖负荷(GL)。
     """
     print(f" [MCP 检索] 正在查询 GI 数据库: {food_name}", file=sys.stderr)
-    context = perform_rag_search(f"{food_name} 升糖指数 GI 血糖负荷")
+    context = await perform_rag_search(f"{food_name} 升糖指数 GI 血糖负荷")
     if not context:
         return f"关于「{food_name}」的升糖指数数据暂未收录，建议咨询专业营养师。"
     return f"【{food_name} GI 检索结果】\n{context}"
@@ -294,7 +286,7 @@ async def search_medical_taboos(disease_name: str) -> str:
     
     # 先查 Redis 语义缓存
     start_time = time.time()
-    cached_result = get_from_cache(disease_name, threshold=0.85)
+    cached_result = await get_from_cache(disease_name, threshold=0.85)
     
     if cached_result:
         latency = (time.time() - start_time) * 1000
@@ -309,7 +301,7 @@ async def search_medical_taboos(disease_name: str) -> str:
     real_answer = f"【{disease_name} 深度检索结果】\n{context}"
     
     # 异步写入缓存（为后续相同的提问铺路）
-    save_to_cache(disease_name, real_answer)
+    await save_to_cache(disease_name, real_answer)
     
     latency = (time.time() - start_time) * 1000
     print(f"[真实计算返回] 耗时: {latency:.2f} ms", file=sys.stderr)

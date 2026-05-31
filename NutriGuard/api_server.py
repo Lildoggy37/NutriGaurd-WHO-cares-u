@@ -87,6 +87,18 @@ async def lifespan(app:FastAPI):
             app.state.graph = build_multi_agent_graph(rag_tools, action_tools)
             print("[生命周期] Multi-Agent 神经网络编译完成，服务就绪。")
 
+            # 5 预热 RAG 引擎（触发懒加载，避免首次用户请求等待 30s）
+            warmup_tool = next(
+                (t for t in rag_tools if t.name == "search_diet_guidelines"), None
+            )
+            if warmup_tool:
+                try:
+                    print("[生命周期] 正在预热 RAG 检索引擎...")
+                    await warmup_tool.ainvoke({"query": "预热"})
+                    print("[生命周期] RAG 引擎预热完成")
+                except Exception as e:
+                    print(f"[生命周期] 预热异常（不影响启动）: {e}")
+
             yield
 
         except Exception as e:

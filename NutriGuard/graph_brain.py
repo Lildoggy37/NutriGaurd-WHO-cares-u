@@ -123,11 +123,11 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             print(f"[Supervisor 兜底] 路由失败: {e}")
             hist = state.get("user_profile", {}).get("历史档案", "")
             if hist:
-                recovery = AIMessage(
+                recovery = SystemMessage(
                     content=f"对话已恢复。根据之前的记录：{hist}\n\n请问还有什么可以帮到您的？"
                 )
             else:
-                recovery = AIMessage(content="我准备好了，请问有什么可以帮您的？")
+                recovery = SystemMessage(content="我准备好了，请问有什么可以帮您的？")
             return {"messages": [recovery], "next_node": "FINISH"}
 
     # =====================================
@@ -291,17 +291,22 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         
         print(f" [Memory Compressor] 警报：上下文已达 {len(messages)} 条，触发滑动窗口压缩！")
 
-        # --- 找到最后一个 HumanMessage，确保保留用户意图 ---
-        last_human_idx = 0
+        # --- 找到最后一个 HumanMessage，确保绝对不删除用户意图 ---
+        last_human_idx = -1
+        last_human = None
         for i in range(len(messages) - 1, -1, -1):
             if isinstance(messages[i], HumanMessage):
                 last_human_idx = i
+                last_human = messages[i]
                 break
 
-        # 保留最后一条用户消息及之后的所有消息 + 保底 8 条
-        keep_from = min(last_human_idx, max(0, len(messages) - 8))
+        if last_human_idx == -1:
+            return {"next_node": "supervisor"}
 
-        # 清理保留区中对 Supervisor 无意义的噪音（ToolMessage、tool_calls AIMessage）
+        # 保留区：从最后用户消息开始 + 保底 6 条，但上限不超过用户消息索引
+        keep_from = min(last_human_idx, max(0, len(messages) - 6))
+
+        # 清理噪音：ToolMessage、tool_calls AIMessage
         kept_raw = messages[keep_from:]
         kept_clean = []
         noise_ids = set()
@@ -320,39 +325,60 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             return {"next_node": "supervisor"}
 
         try:
+            # 结构化摘要：JSON 格式，保留关键字段供后续节点使用
             old_text = "\n".join(
                 [f"{m.type}: {str(m.content)[:300]}" for m in old_messages]
             )
-            summary_prompt = "请用 50 个字总结以下对话的核心健康线索，不要遗漏用户的疾病和过敏史："
+            summary_prompt = (
+                "请从以下对话中提取关键健康信息，以 JSON 格式输出，不要其他内容：\n"
+                '{"用户疾病": "糖尿病,痛风", "已记录信息": "身高168,体重55", '
+                '"用户偏好": "", "待完成事项": ""}\n\n'
+                f"对话内容：\n{old_text}"
+            )
 
-            summary_decision = await llm.ainvoke([
+            summary_response = await llm.ainvoke([
                 SystemMessage(content=summary_prompt),
                 HumanMessage(content=old_text),
             ])
 
             current_profile = state.get("user_profile", {})
-            current_profile["历史档案"] = summary_decision.content
+            try:
+                summary_data = json.loads(
+                    _extract_json(str(summary_response.content))
+                )
+                current_profile.update(summary_data)
+            except Exception:
+                current_profile["历史档案"] = str(summary_response.content)
 
-            # 删除旧消息 + 保留区中的噪音消息
+            # 删除旧消息 + 噪音
             all_delete_ids = {m.id for m in old_messages if m.id} | noise_ids
             delete_ops = [RemoveMessage(id=mid) for mid in all_delete_ids]
 
-            # 用 AIMessage 注入恢复消息（对用户可见且给 supervisor 清晰上下文）
-            recovery = AIMessage(
-                content=(
-                    f"我已经整理了您的对话要点：{summary_decision.content}\n\n"
-                    f"有什么我可以继续帮您的吗？"
-                )
+            # SystemMessage 注入摘要（不触发 Qwen role 交替校验）
+            summary_text = json.dumps(
+                {k: v for k, v in current_profile.items() if k != "用户标识"},
+                ensure_ascii=False,
             )
+            recovery = SystemMessage(
+                content=f"[对话摘要] {summary_text}",
+                name="memory_summary",
+            )
+
+            # 确保最后用户消息不被误删
+            return_messages = delete_ops + [recovery]
+            lost_human = last_human and last_human.id in all_delete_ids
+            if lost_human:
+                return_messages.append(
+                    HumanMessage(content=str(last_human.content))
+                )
 
             print(
                 f"[压缩完成] 删除 {len(delete_ops)} 条，"
-                f"保留 {len(kept_clean)} 条干净消息，"
-                f"摘要: {summary_decision.content}"
+                f"保留 {len(kept_clean)} 条，摘要: {summary_text[:80]}"
             )
 
             return {
-                "messages": delete_ops + [recovery],
+                "messages": return_messages,
                 "user_profile": current_profile,
                 "next_node": "supervisor",
             }
