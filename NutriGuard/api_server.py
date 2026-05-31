@@ -213,21 +213,24 @@ async def chat_stream_endpoint(request: ChatRequest):
         config = {"configurable": {"thread_id": request.session_id}}
         graph = app.state.graph
 
+        node_timers: dict[str, float] = {}
+        overall_start = time.time()
+
         try:
             async for event in graph.astream_events(initial_state, config=config, version="v2"):
                 kind = event["event"]
+                now = time.time()
 
-                # LLM 打字机效果 — 黑名单模式：默认放行，只排除 supervisor/reflection
-                # create_agent 内部子节点（"agent"/"tools"等）均会正常流式输出
+                # LLM 打字机效果 — 黑名单模式
                 if kind == "on_chat_model_stream":
                     node_name = event.get("metadata", {}).get("langgraph_node", "")
                     HIDDEN_NODES = {"supervisor", "rag_reflection", "memory_compressor"}
                     if node_name not in HIDDEN_NODES:
                         chunk = event["data"]["chunk"]
                         if hasattr(chunk, "content") and chunk.content is not None:
-                            yield f"data: {json.dumps({'type': 'text', 'content': chunk.content}, ensure_ascii=False)}\n\n"
+                            yield f"data: {json.dumps({'type': 'text', 'content': chunk.content, 'time': round(now - overall_start, 2)}, ensure_ascii=False)}\n\n"
 
-                # Agent 节点状态
+                # Agent 节点状态 — 开始
                 elif kind == "on_chain_start":
                     node_name = event.get("name", "")
                     STATUS_NODES = {
@@ -235,10 +238,15 @@ async def chat_stream_endpoint(request: ChatRequest):
                         "action_expert", "slot_filler", "memory_compressor",
                     }
                     if node_name in STATUS_NODES:
-                        yield f"data: {json.dumps({'type': 'status', 'content': f'🔍 节点 [{node_name}] 开始思考...'}, ensure_ascii=False)}\n\n"
+                        node_timers[node_name] = now
+                        yield f"data: {json.dumps({'type': 'status', 'content': f'节点 [{node_name}] 开始...', 'time': round(now - overall_start, 2)}, ensure_ascii=False)}\n\n"
 
+                # Agent 节点状态 — 结束（含耗时）
                 elif kind == "on_chain_end":
-                    pass  # slot_filler 已改为 LLM 生成，由 on_chat_model_stream 处理
+                    node_name = event.get("name", "")
+                    if node_name in node_timers:
+                        elapsed = round(now - node_timers.pop(node_name), 2)
+                        yield f"data: {json.dumps({'type': 'status', 'content': f'节点 [{node_name}] 完成 ({elapsed}s)', 'time': round(now - overall_start, 2)}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             import traceback
@@ -254,4 +262,4 @@ async def chat_stream_endpoint(request: ChatRequest):
 if __name__ == "__main__":
     import uvicorn
     # uvicorn 启动入口
-    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("api_server:app", host="0.0.0.0", port=8000, reload=True) 

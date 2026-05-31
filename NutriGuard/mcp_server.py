@@ -281,26 +281,42 @@ async def save_to_cache(query: str, answer: str):
 #   class1  知识检索类 read-only
 # ============================
 @mcp.tool()
-async def search_diet_guidelines(query:str)->str:
+async def search_diet_guidelines(query: str) -> str:
     """
     专门用于查询《中国居民膳食指南》和普适性营养原则。
     """
-    print(f" [MCP 检索] 正在查阅膳食指南: {query}", file=sys.stderr)
+    # 先查 Redis 语义缓存
+    start_time = time.time()
+    cached = await get_from_cache(query, threshold=0.85)
+    if cached:
+        print(f"[Cache 命中] {query[:30]}... ({time.time()-start_time:.1f}s)", file=sys.stderr)
+        return cached
+
+    print(f"[MCP 检索] 查阅膳食指南: {query[:40]}...", file=sys.stderr)
     context = await perform_rag_search(query)
     if not context:
         return "抱歉，本地知识库暂时不可用，请稍后再试。"
-    return f"【膳食指南检索结果】\n{context}"
+    result = f"【膳食指南检索结果】\n{context}"
+    await save_to_cache(query, result)
+    return result
 
 @mcp.tool()
 async def check_food_gi(food_name: str) -> str:
     """
     查询特定食物的升糖指数(GI)和血糖负荷(GL)。
     """
-    print(f" [MCP 检索] 正在查询 GI 数据库: {food_name}", file=sys.stderr)
-    context = await perform_rag_search(f"{food_name} 升糖指数 GI 血糖负荷")
+    query = f"{food_name} 升糖指数 GI 血糖负荷"
+    cached = await get_from_cache(query, threshold=0.85)
+    if cached:
+        return cached
+
+    print(f"[MCP 检索] 查询 GI: {food_name}", file=sys.stderr)
+    context = await perform_rag_search(query)
     if not context:
         return f"关于「{food_name}」的升糖指数数据暂未收录，建议咨询专业营养师。"
-    return f"【{food_name} GI 检索结果】\n{context}"
+    result = f"【{food_name} GI 检索结果】\n{context}"
+    await save_to_cache(query, result)
+    return result
 
 @mcp.tool()
 async def search_medical_taboos(disease_name: str) -> str:
