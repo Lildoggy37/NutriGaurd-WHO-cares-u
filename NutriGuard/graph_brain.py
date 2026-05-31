@@ -46,13 +46,13 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     rag_agent = create_agent(
         model=llm,
         tools=rag_tools,
-        system_prompt="你是一个顶级的营养学与 RAG 检索专家。请优先调用工具查询专业数据，绝不要瞎编医学常识。回答要客观严谨。"
+        system_prompt="你是一个营养学与 RAG 检索专家。优先调用工具查询数据，不要编造医学常识。回答客观严谨，解答完即停止，不要主动追问或提出新话题。"
     )
 
     action_agent = create_agent(
         model=llm,
         tools=action_tools,
-        system_prompt="你是一个极其严谨的健康管家。你的职责是调用工具记录饮食和热量。如果用户提供的信息不够，你可以反问。"
+        system_prompt="你是一个严谨的健康管家。调用工具完成用户请求的操作后，简洁确认即可。不要主动追问或提出新话题，让用户自行决定下一步。"
     )
 
     # =====================================
@@ -73,34 +73,60 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             return m.group(0).strip()
         return text.strip()
 
-    ROUTE_PROMPT = """你是一个高级医疗健康分发路由。请根据对话历史决定下一步操作，并输出 JSON。
+    ROUTE_PROMPT = """你是医疗健康路由分发器。只根据最近一条用户消息（HumanMessage）判断路由，忽略 AI 消息中的建议和追问。
 
     路由规则：
-    - 用户在询问疾病禁忌、指南知识 → rag_expert
-    - 用户想记录饮食、计算热量、生成采购清单 → action_expert
-    - 用户的话信息不全（如只说"记早饭"但没说什么食物）→ slot_filler
-    - 问题已经彻底解答完毕、或简单闲聊问候 → FINISH
+    - 用户在询问疾病禁忌、指南知识、营养成分 → rag_expert
+    - 用户想记录饮食、计算热量、更新健康信息、生成采购清单 → action_expert
+    - 用户的话信息不全 → slot_filler
+    - 以下情况选 FINISH：
+      * AI 刚完成一次操作且已确认结果，用户在等待下一步指令
+      * AI 的回复是确认/追问/建议，且对话末尾没有新的用户消息
+      * 用户明确表示满意或说再见
 
-    请严格按以下 JSON 格式输出，不要附加任何其他文字：
-    {"next_node": "<rag_expert|action_expert|slot_filler|FINISH>", "reason": "你的路由理由"}"""
+    重要：不要根据 AI 回复中出现的"帮您记录""帮您查看""推荐"等字样判断为需要进一步操作。这些是 AI 的提问，不是用户的指令。只有当用户显式说出操作意图时才路由到对应节点。"""
 
     async def supervisor_node(state: AgentState):
         print("[Supervisor] 正在审视意图...")
+
+        # 只取最近的用户消息 + AI 回复，避免旧消息干扰
+        recent = []
+        for m in reversed(state["messages"]):
+            recent.insert(0, {"type": m.type, "content": str(m.content)[:200]})
+            if len(recent) >= 4:
+                break
+
         profile_str = json.dumps(state.get("user_profile", {}), ensure_ascii=False)
+        context = "\n".join([f"[{r['type']}] {r['content']}" for r in recent])
 
-        sys_prompt = ROUTE_PROMPT + f"\n\n当前用户已知健康画像：{profile_str}"
+        sys_prompt = (
+            ROUTE_PROMPT
+            + f"\n当前健康画像：{profile_str}"
+            + f"\n最近对话：\n{context}"
+            + "\n\n根据以上信息，输出 JSON 路由决策。"
+        )
 
-        messages = [SystemMessage(content=sys_prompt)] + state["messages"]
+        messages = [SystemMessage(content=sys_prompt)]   # 不带 state messages，只用摘要
 
         try:
             response = await llm.ainvoke(messages)
-            json_str = _extract_json(str(response.content))
+            raw = str(response.content) if response.content else ""
+            if not raw.strip():
+                raise ValueError("LLM returned empty content")
+            json_str = _extract_json(raw)
             decision = RouteDecision.model_validate_json(json_str)
-            print(f"[路由分发] 决定去向: {decision.next_node} | 理由: {decision.reason}")
+            print(f"[路由分发] {decision.next_node} | {decision.reason}")
             return {"next_node": decision.next_node}
         except Exception as e:
-            print(f"[Supervisor 兜底] 路由解析失败: {e}，强制 FINISH")
-            return {"next_node": "FINISH"}
+            print(f"[Supervisor 兜底] 路由失败: {e}")
+            hist = state.get("user_profile", {}).get("历史档案", "")
+            if hist:
+                recovery = AIMessage(
+                    content=f"对话已恢复。根据之前的记录：{hist}\n\n请问还有什么可以帮到您的？"
+                )
+            else:
+                recovery = AIMessage(content="我准备好了，请问有什么可以帮您的？")
+            return {"messages": [recovery], "next_node": "FINISH"}
 
     # =====================================
     #    4. worker node
@@ -263,34 +289,73 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         
         print(f" [Memory Compressor] 警报：上下文已达 {len(messages)} 条，触发滑动窗口压缩！")
 
-        # 压缩范围
-        old_messages = messages[:-2] # 最后两条，最新两条
+        # --- 找到最后一个 HumanMessage，确保保留用户意图 ---
+        last_human_idx = 0
+        for i in range(len(messages) - 1, -1, -1):
+            if isinstance(messages[i], HumanMessage):
+                last_human_idx = i
+                break
+
+        # 保留最后一条用户消息及之后的所有消息 + 保底 8 条
+        keep_from = min(last_human_idx, max(0, len(messages) - 8))
+
+        # 清理保留区中对 Supervisor 无意义的噪音（ToolMessage、tool_calls AIMessage）
+        kept_raw = messages[keep_from:]
+        kept_clean = []
+        noise_ids = set()
+        for m in kept_raw:
+            if isinstance(m, ToolMessage):
+                noise_ids.add(m.id)
+                continue
+            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
+                noise_ids.add(m.id)
+                continue
+            kept_clean.append(m)
+
+        old_messages = messages[:keep_from]
+
+        if len(old_messages) <= 4:
+            return {"next_node": "supervisor"}
 
         try:
-            # 调用大模型浓缩
-            summary_prompt = "请用 50 个字总结以下对话的核心健康线索，不要遗漏用户的疾病和过敏史："
-            old_messages_text = "\n".join([f"{m.type}: {m.content}" for m in old_messages])
-            
-            summary_decision = await llm.ainvoke(
-                [SystemMessage(content=summary_prompt),HumanMessage(content=old_messages_text)]
+            old_text = "\n".join(
+                [f"{m.type}: {str(m.content)[:300]}" for m in old_messages]
             )
+            summary_prompt = "请用 50 个字总结以下对话的核心健康线索，不要遗漏用户的疾病和过敏史："
 
-            # 提取现有画像融入
-            current_profile = state.get("user_profile",{})
+            summary_decision = await llm.ainvoke([
+                SystemMessage(content=summary_prompt),
+                HumanMessage(content=old_text),
+            ])
+
+            current_profile = state.get("user_profile", {})
             current_profile["历史档案"] = summary_decision.content
 
-            # 删除就对话
-            delete_ops = [RemoveMessage(id=m.id) for m in old_messages]
-            print(f"✅ [压缩完成] 删除了 {len(delete_ops)} 条废话，提取了核心画像：{summary_decision.content}")
-            
-            # 将删除指令和更新后的画像写回黑板，控制权交还给Supervisor
+            # 删除旧消息 + 保留区中的噪音消息
+            all_delete_ids = {m.id for m in old_messages if m.id} | noise_ids
+            delete_ops = [RemoveMessage(id=mid) for mid in all_delete_ids]
+
+            # 用 AIMessage 注入恢复消息（对用户可见且给 supervisor 清晰上下文）
+            recovery = AIMessage(
+                content=(
+                    f"我已经整理了您的对话要点：{summary_decision.content}\n\n"
+                    f"有什么我可以继续帮您的吗？"
+                )
+            )
+
+            print(
+                f"[压缩完成] 删除 {len(delete_ops)} 条，"
+                f"保留 {len(kept_clean)} 条干净消息，"
+                f"摘要: {summary_decision.content}"
+            )
+
             return {
-                "messages": delete_ops, 
+                "messages": delete_ops + [recovery],
                 "user_profile": current_profile,
-                "next_node": "supervisor"
+                "next_node": "supervisor",
             }
         except Exception as e:
-            print(f" [压缩节点异常] {e}。跳过本次压缩。")
+            print(f"[压缩节点异常] {e}，跳过本次压缩")
             return {"next_node": "supervisor"}
 
     # =====================================
