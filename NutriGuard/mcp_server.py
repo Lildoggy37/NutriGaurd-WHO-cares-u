@@ -20,6 +20,11 @@ from db import (
     upsert_health_profile, get_health_profile,
 )
 from nutrition import calculate_daily_target, format_target_report
+# 监测组件
+from monitoring import (
+    rag_search_total, rag_cache_hit_total, rag_cache_miss_total,
+    rag_search_duration, rag_engine_ready,
+)
 
 # ============================
 #   1. 构建MCP Redis  本地向量模型
@@ -111,6 +116,7 @@ async def _init_rag_engine_async():
         print(f"  [RAG-init] Reranker 加载完成 ({time.time()-t5:.1f}s)", file=sys.stderr)
 
         _rag_ready = True
+        rag_engine_ready.set(1) # 监测
         print(f"[RAG-init] === 全量就绪，总耗时 {time.time()-t0:.1f}s ===", file=sys.stderr)
     finally:
         _rag_init_event.set()
@@ -128,6 +134,7 @@ async def perform_rag_search(query: str, top_k: int = 3) -> str:
     """
     t0 = time.time()
     print(f"[RAG-search] 收到查询: {query[:60]}...", file=sys.stderr)
+    rag_search_total.labels(tool_name="perform_rag_search").inc() # 监测
 
     t_init = time.time()
     await _init_rag_engine_async()
@@ -289,8 +296,10 @@ async def search_diet_guidelines(query: str) -> str:
     start_time = time.time()
     cached = await get_from_cache(query, threshold=0.85)
     if cached:
+        rag_cache_hit_total.labels(tool_name="search_diet_guidelines").inc()
         print(f"[Cache 命中] {query[:30]}... ({time.time()-start_time:.1f}s)", file=sys.stderr)
         return cached
+    rag_cache_miss_total.labels(tool_name="search_diet_guidelines").inc()
 
     print(f"[MCP 检索] 查阅膳食指南: {query[:40]}...", file=sys.stderr)
     context = await perform_rag_search(query)
@@ -308,7 +317,9 @@ async def check_food_gi(food_name: str) -> str:
     query = f"{food_name} 升糖指数 GI 血糖负荷"
     cached = await get_from_cache(query, threshold=0.85)
     if cached:
+        rag_cache_hit_total.labels(tool_name="check_food_gi").inc()
         return cached
+    rag_cache_miss_total.labels(tool_name="check_food_gi").inc()
 
     print(f"[MCP 检索] 查询 GI: {food_name}", file=sys.stderr)
     context = await perform_rag_search(query)
@@ -327,15 +338,17 @@ async def search_medical_taboos(disease_name: str) -> str:
     # 先查 Redis 语义缓存
     start_time = time.time()
     cached_result = await get_from_cache(disease_name, threshold=0.85)
-    
+
     if cached_result:
+        rag_cache_hit_total.labels(tool_name="search_medical_taboos").inc() # 监测
         latency = (time.time() - start_time) * 1000
         print(f"⚡ [Redis 极速返回] 耗时: {latency:.2f} ms", file=sys.stderr)
         return cached_result
 
     # 未命中缓存，执行真实的双路召回 + Reranker 检索
+    rag_cache_miss_total.labels(tool_name="search_medical_taboos").inc() # 监测
     print(f"[Cache 未命中] 正在执行深度 RAG 检索: {disease_name}...", file=sys.stderr)
-    context = perform_rag_search(disease_name)
+    context = await perform_rag_search(disease_name)
     if not context:
         return "抱歉，本地知识库暂时不可用，请稍后再试。"
     real_answer = f"【{disease_name} 深度检索结果】\n{context}"

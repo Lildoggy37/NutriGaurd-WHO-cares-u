@@ -18,6 +18,13 @@ import redis.asyncio as aioredis
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
 
+# 监控组件
+from monitoring import (
+    http_requests_total, http_request_duration,
+    graph_node_duration, graph_node_total, graph_node_errors,
+    get_metrics,
+)
+
 # 导入底层组件
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -117,6 +124,29 @@ app = FastAPI(
 )
 
 app.add_middleware(CORSMiddleware,allow_origins=["*"],allow_credentials=True,allow_methods=["*"], allow_headers=["*"])
+
+# HTTP 请求监控中间件
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - start
+    http_requests_total.labels(
+        method=request.method,
+        endpoint=request.url.path,
+        status_code=str(response.status_code),
+    ).inc()
+    http_request_duration.labels(
+        method=request.method,
+        endpoint=request.url.path,
+    ).observe(elapsed)
+    return response
+
+# Prometheus 指标暴露端点
+@app.get("/metrics")
+async def metrics_endpoint():
+    from fastapi.responses import Response
+    return Response(content=get_metrics(), media_type="text/plain")
 
 # ==========================================
 #   2. Redis 滑动窗口，限流防爆
@@ -239,13 +269,15 @@ async def chat_stream_endpoint(request: ChatRequest):
                     }
                     if node_name in STATUS_NODES:
                         node_timers[node_name] = now
+                        graph_node_total.labels(node_name=node_name).inc()
                         yield f"data: {json.dumps({'type': 'status', 'content': f'节点 [{node_name}] 开始...', 'time': round(now - overall_start, 2)}, ensure_ascii=False)}\n\n"
 
-                # Agent 节点状态 — 结束（含耗时）
+                # Agent 节点状态 — 结束（含耗时 + 指标）
                 elif kind == "on_chain_end":
                     node_name = event.get("name", "")
                     if node_name in node_timers:
                         elapsed = round(now - node_timers.pop(node_name), 2)
+                        graph_node_duration.labels(node_name=node_name).observe(elapsed)
                         yield f"data: {json.dumps({'type': 'status', 'content': f'节点 [{node_name}] 完成 ({elapsed}s)', 'time': round(now - overall_start, 2)}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
