@@ -75,23 +75,30 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             return m.group(0).strip()
         return text.strip()
 
-    ROUTE_PROMPT = """你是医疗健康路由分发器。只根据最近一条用户消息（HumanMessage）判断路由，忽略 AI 消息中的建议和追问。
+    ROUTE_PROMPT = """你是医疗健康路由分发器。请先逐步分析，再输出 JSON 路由决策。
 
-    路由规则：
-    - 用户在询问疾病禁忌、指南知识、营养成分 → rag_expert
+    【分析步骤】请依次思考：
+    1. 用户最后一句话的核心诉求是什么？（一句话概括）
+    2. 这属于哪类意图？知识查询(rag) / 操作执行(action) / 信息不全(slot) / 对话结束(FINISH)？
+    3. 如果选 FINISH，确认理由是什么？如果选其他节点，用户是否已提供足够信息？
+    4. 最终路由决定：
+
+    【路由规则】
+    - 用户询问疾病禁忌、指南知识、营养成分 → rag_expert
     - 用户想记录饮食、计算热量、更新健康信息、生成采购清单 → action_expert
     - 用户的话信息不全 → slot_filler
     - 以下情况选 FINISH：
-    * AI 刚完成一次操作且已确认结果，用户在等待下一步指令
-    * AI 的回复是确认/追问/建议，且对话末尾没有新的用户消息
+    * AI 刚完成一次操作且已确认结果，对话末尾无新的用户消息
+    * AI 回复是确认，用户在等待下一步指令
     * 用户明确表示满意或说再见
 
-    重要：不要根据 AI 回复中出现的"帮您记录""帮您查看""推荐"等字样判断为需要进一步操作。这些是 AI 的提问，不是用户的指令。只有当用户显式说出操作意图时才路由到对应节点。
+    重要：不要根据 AI 回复中的"帮您记录""帮您查看""推荐"等建议词判断路由。只有用户显式说出操作意图时才路由。
 
-    【输出格式】严格按以下 JSON 输出，不得有任何其他文字、markdown、代码块：
-    {"route": "rag_expert", "reason": "用户询问了营养知识"}
+    【输出格式】先输出分析，再输出一行 JSON，不要 markdown 代码块：
+    （分析文字...）
+    {"route": "rag_expert", "reason": "理由"}
 
-    route 只能是以下四个值之一：rag_expert / action_expert / slot_filler / FINISH"""
+    route 只能是四个值之一：rag_expert / action_expert / slot_filler / FINISH"""
 
     async def supervisor_node(state: AgentState):
         print("[Supervisor] 正在审视意图...")
