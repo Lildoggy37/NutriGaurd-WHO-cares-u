@@ -8,6 +8,7 @@ SQLite 持久化层 — 异步 CRUD。
 """
 import sqlite3
 import os
+import json
 from datetime import datetime, date
 
 DB_PATH = os.environ.get("DB_PATH", os.path.join(os.path.dirname(os.path.abspath(__file__)), "nutriguard.db"))
@@ -345,5 +346,78 @@ def get_health_profile(user_id: str) -> dict | None:
             "SELECT * FROM user_health_profiles WHERE user_id = ?", (user_id,)
         ).fetchone()
         return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+# ============================================================
+#  长期记忆表（三层记忆架构 Layer 3）
+# ============================================================
+
+def _ensure_long_term_table():
+    conn = get_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS long_term_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                source TEXT DEFAULT 'compressor',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_ltm_user_key
+            ON long_term_memories(user_id, key)
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_ensure_long_term_table()
+
+
+def save_long_term_memories(user_id: str, facts: dict, source: str = "compressor"):
+    """保存长期记忆事实。facts: {"疾病史": "糖尿病,痛风", "饮食偏好": "低GI"}"""
+    conn = get_connection()
+    try:
+        for key, value in facts.items():
+            if not value:
+                continue
+            val_str = json.dumps(value, ensure_ascii=False) if isinstance(value, (list, dict)) else str(value)
+            # 更新或插入
+            existing = conn.execute(
+                "SELECT id FROM long_term_memories WHERE user_id=? AND key=?",
+                (user_id, key),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE long_term_memories SET value=?, source=?, created_at=? WHERE id=?",
+                    (val_str, source, datetime.now().isoformat(), existing["id"]),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO long_term_memories (user_id, key, value, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                    (user_id, key, val_str, source, datetime.now().isoformat()),
+                )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def load_long_term_memories(user_id: str) -> dict:
+    """加载用户长期记忆，返回 {key: value}"""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM long_term_memories WHERE user_id=? ORDER BY created_at DESC",
+            (user_id,),
+        ).fetchall()
+        return {r["key"]: r["value"] for r in rows}
     finally:
         conn.close()

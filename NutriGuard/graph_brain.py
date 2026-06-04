@@ -14,6 +14,13 @@ from langgraph.prebuilt import ToolNode
 from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
 
+from memory import (
+    estimate_tokens, split_messages, format_messages_for_llm,
+    build_summary_prompt, build_extraction_prompt, find_last_complete_ai,
+    WORKING_MEMORY_TOKENS,
+    save_long_term_memory, load_long_term_memory,
+)
+
 
 
 # =====================================
@@ -374,123 +381,127 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    4.5 memory_compressor 记忆压缩结点
     # =====================================
 
-    # 并发安全的记忆管理
-    async def memory_compressor_node(state:AgentState):
+    # =====================================
+    #    三层记忆压缩（token 阈值替代消息数）
+    # =====================================
+    async def memory_compressor_node(state: AgentState):
         messages = state["messages"]
+        token_estimate = estimate_tokens(messages)
 
-        # 压缩阈值
-        if len(messages) <= 10:
-            return {"next_node":"FINISH"}
-        
-        print(f" [Memory Compressor] 警报：上下文已达 {len(messages)} 条，触发滑动窗口压缩！")
+        if token_estimate <= WORKING_MEMORY_TOKENS:
+            return {"next_node": "FINISH"}
 
-        # --- 找到最后一个 HumanMessage，确保绝对不删除用户意图 ---
-        last_human_idx = -1
-        last_human = None
-        for i in range(len(messages) - 1, -1, -1):
-            if isinstance(messages[i], HumanMessage):
-                last_human_idx = i
-                last_human = messages[i]
+        print(
+            f"[Memory] 上下文 {len(messages)} 条 / ~{token_estimate} tokens，触发压缩"
+        )
+
+        user_id = state.get("user_profile", {}).get("用户标识", "unknown")
+
+        # ----- Layer 分离 -----
+        layer_recent, layer_middle, layer_old = split_messages(messages)
+
+        if not layer_middle and not layer_old:
+            return {"next_node": "FINISH"}
+
+        # ----- 保留 FINISH 信号 -----
+        finish_signal = None
+        complete_idx = find_last_complete_ai(messages)
+        if complete_idx >= 0:
+            finish_signal = messages[complete_idx]
+
+        # ----- 确保最后 HumanMessage 不被删 -----
+        last_human_content = None
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage):
+                last_human_content = str(m.content)
                 break
 
-        if last_human_idx == -1:
-            return {"next_node": "supervisor"}
-
-        # 保留区：从最后用户消息开始 + 保底 6 条，但上限不超过用户消息索引
-        keep_from = min(last_human_idx, max(0, len(messages) - 6))
-
-        # 清理噪音：ToolMessage、tool_calls AIMessage
-        kept_raw = messages[keep_from:]
-        kept_clean = []
-        noise_ids = set()
-        for m in kept_raw:
-            if isinstance(m, ToolMessage):
-                noise_ids.add(m.id)
-                continue
-            if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-                noise_ids.add(m.id)
-                continue
-            kept_clean.append(m)
-
-        old_messages = messages[:keep_from]
-
-        if len(old_messages) <= 4:
-            return {"next_node": "supervisor"}
-
         try:
-            # 结构化摘要：JSON 格式，保留关键字段供后续节点使用
-            old_text = "\n".join(
-                [f"{m.type}: {str(m.content)[:300]}" for m in old_messages]
-            )
-            summary_prompt = (
-                "请从以下对话中提取关键健康信息，以 JSON 格式输出，不要其他内容：\n"
-                '{"用户疾病": "糖尿病,痛风", "已记录信息": "身高168,体重55", '
-                '"用户偏好": "", "待完成事项": ""}\n\n'
-                f"对话内容：\n{old_text}"
-            )
-
-            summary_response = await llm.ainvoke([
-                SystemMessage(content=summary_prompt),
-                HumanMessage(content=old_text),
-            ])
-
             current_profile = state.get("user_profile", {})
-            try:
-                summary_data = json.loads(
-                    _extract_json(str(summary_response.content))
+
+            # --- Layer 3: 早期对话 -> 长期记忆 ---
+            if layer_old:
+                old_text = format_messages_for_llm(layer_old)
+                extraction_prompt = build_extraction_prompt(old_text)
+                try:
+                    extraction_response = await llm.ainvoke([
+                        SystemMessage(content=extraction_prompt),
+                    ])
+                    facts_raw = _extract_json(str(extraction_response.content))
+                    facts = json.loads(facts_raw)
+                    save_long_term_memory(user_id, facts)
+                    print(f"[Memory] Layer 3: 提取长期记忆 {len(facts)} 条")
+                except Exception as e:
+                    print(f"[Memory] Layer 3 提取失败: {e}")
+
+            # --- Layer 2: 中间对话 -> 摘要 ---
+            summary_text = ""
+            if layer_middle:
+                middle_text = format_messages_for_llm(layer_middle)
+                summary_prompt = build_summary_prompt(middle_text)
+                try:
+                    summary_response = await llm.ainvoke([
+                        SystemMessage(content=summary_prompt),
+                    ])
+                    summary_text = str(summary_response.content)[:200]
+                    current_profile["对话摘要"] = summary_text
+                    print(f"[Memory] Layer 2: 压缩 {len(layer_middle)} 条 -> 摘要")
+                except Exception as e:
+                    print(f"[Memory] Layer 2 压缩失败: {e}")
+
+            # --- Layer 1: 最近 N 轮保留 + 摘要 + 长期记忆注入 ---
+            ltm = load_long_term_memory(user_id)
+            if ltm:
+                current_profile["长期记忆"] = json.dumps(ltm, ensure_ascii=False)
+
+            # 构建压缩后的消息列表
+            delete_ids = set()
+            for m in layer_old:
+                if getattr(m, "id", None):
+                    delete_ids.add(m.id)
+            for m in layer_middle:
+                if getattr(m, "id", None):
+                    delete_ids.add(m.id)
+
+            delete_ops = [RemoveMessage(id=mid) for mid in delete_ids if mid]
+
+            new_messages = []
+            if summary_text:
+                new_messages.append(
+                    SystemMessage(
+                        content=f"[对话摘要] {summary_text}",
+                        name="memory_summary",
+                    )
                 )
-                current_profile.update(summary_data)
-            except Exception:
-                current_profile["历史档案"] = str(summary_response.content)
 
-            # 删除旧消息 + 噪音
-            all_delete_ids = {m.id for m in old_messages if m.id} | noise_ids
-            delete_ops = [RemoveMessage(id=mid) for mid in all_delete_ids]
+            # 确保最后 HumanMessage 在保留区内
+            has_human = any(isinstance(m, HumanMessage) for m in layer_recent)
+            if not has_human and last_human_content:
+                new_messages.append(HumanMessage(content=last_human_content))
 
-            # SystemMessage 注入摘要（不触发 Qwen role 交替校验）
-            summary_text = json.dumps(
-                {k: v for k, v in current_profile.items() if k != "用户标识"},
-                ensure_ascii=False,
+            # 确保 FINISH 信号保留
+            has_finish = any(
+                isinstance(m, AIMessage) and not getattr(m, "tool_calls", None)
+                for m in layer_recent
             )
-            recovery = SystemMessage(
-                content=f"[对话摘要] {summary_text}",
-                name="memory_summary",
-            )
-
-            # 保留终止信号：最后一条非工具调用的 AIMessage
-            last_complete_ai = None
-            for m in reversed(messages):
-                if isinstance(m, AIMessage) and not getattr(m, "tool_calls", None):
-                    last_complete_ai = m
-                    break
-
-            # 确保最后用户消息不被误删
-            return_messages = delete_ops + [recovery]
-            lost_human = last_human and last_human.id in all_delete_ids
-            if lost_human:
-                return_messages.append(
-                    HumanMessage(content=str(last_human.content))
-                )
-            # 保留完整 AI 回答作为终止信号，让 supervisor 识别"已完成"
-            if last_complete_ai and last_complete_ai.id in all_delete_ids:
-                return_messages.append(
-                    AIMessage(content=str(last_complete_ai.content))
+            if not has_finish and finish_signal:
+                new_messages.append(
+                    AIMessage(content=str(finish_signal.content))
                 )
 
             print(
-                f"[压缩完成] 删除 {len(delete_ops)} 条，"
-                f"保留 {len(kept_clean)} 条，摘要: {summary_text[:80]}"
+                f"[Memory] 压缩完成: 删除 {len(delete_ids)} 条，"
+                f"保留 {len(layer_recent)} 条 (Layer1) + {len(new_messages)} 条元数据"
             )
 
             return {
-                "messages": return_messages,
+                "messages": delete_ops + new_messages,
                 "user_profile": current_profile,
-                "next_node": "FINISH",  # 压缩后直接结束，避免再回 supervisor 死循环
+                "next_node": "FINISH",
             }
         except Exception as e:
-            print(f"[压缩节点异常] {e}，跳过本次压缩")
+            print(f"[Memory] 压缩异常: {e}，跳过")
             return {"next_node": "FINISH"}
-
     # =====================================
     #    5. draw graph
     # =====================================
