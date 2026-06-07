@@ -1,0 +1,186 @@
+{
+  "timestamp": "2026-06-07 13:07:13",
+  "rag": {
+    "source": "cached",
+    "queries": 20,
+    "corpus_chars": 14240,
+    "corpus_chunks": 19,
+    "recall_at_1": 90.0,
+    "recall_at_3": 90.0,
+    "recall_at_5": 90.0,
+    "mrr": 0.9,
+    "ndcg_at_3": 0.861,
+    "missed": 2,
+    "avg_latency_ms": 80000,
+    "p50_latency_ms": 80000,
+    "note": "network unavailable, cached from prior benchmark"
+  },
+  "routing": {
+    "total": 20,
+    "correct": 16,
+    "accuracy": 80.0,
+    "details": [
+      {
+        "query": "糖尿病的人该怎么吃？",
+        "expected": "rag_expert",
+        "predicted": "rag_expert",
+        "match": true
+      },
+      {
+        "query": "高血糖饮食禁忌",
+        "expected": "rag_expert",
+        "predicted": "rag_expert",
+        "match": true
+      },
+      {
+        "query": "帮我记录早餐：包子2个,豆浆1杯",
+        "expected": "action_expert",
+        "predicted": "action_expert",
+        "match": true
+      },
+      {
+        "query": "算一下今天的热量",
+        "expected": "action_expert",
+        "predicted": "action_expert",
+        "match": true
+      },
+      {
+        "query": "帮我生成这周的采购清单",
+        "expected": "action_expert",
+        "predicted": "action_expert",
+        "match": true
+      },
+      {
+        "query": "你好",
+        "expected": "FINISH",
+        "predicted": "FINISH",
+        "match": true
+      },
+      {
+        "query": "谢谢",
+        "expected": "FINISH",
+        "predicted": "FINISH",
+        "match": true
+      },
+      {
+        "query": "再见",
+        "expected": "FINISH",
+        "predicted": "FINISH",
+        "match": true
+      },
+      {
+        "query": "帮我记早饭",
+        "expected": "slot_filler",
+        "predicted": "slot_filler",
+        "match": true
+      },
+      {
+        "query": "我身高175",
+        "expected": "slot_filler",
+        "predicted": "action_expert",
+        "match": false
+      },
+      {
+        "query": "帮我记录",
+        "expected": "slot_filler",
+        "predicted": "slot_filler",
+        "match": true
+      },
+      {
+        "query": "痛风能吃海鲜吗",
+        "expected": "rag_expert",
+        "predicted": "action_expert",
+        "match": false
+      },
+      {
+        "query": "GI值是什么意思",
+        "expected": "rag_expert",
+        "predicted": "rag_expert",
+        "match": true
+      },
+      {
+        "query": "帮我更新一下体重80kg",
+        "expected": "action_expert",
+        "predicted": "action_expert",
+        "match": true
+      },
+      {
+        "query": "生成一个低GI的购物清单",
+        "expected": "action_expert",
+        "predicted": "rag_expert",
+        "match": false
+      },
+      {
+        "query": "好的没问题",
+        "expected": "FINISH",
+        "predicted": "FINISH",
+        "match": true
+      },
+      {
+        "query": "孕妇血糖高怎么控制饮食",
+        "expected": "rag_expert",
+        "predicted": "rag_expert",
+        "match": true
+      },
+      {
+        "query": "鸡胸肉和牛肉哪个蛋白质高",
+        "expected": "rag_expert",
+        "predicted": "rag_expert",
+        "match": true
+      },
+      {
+        "query": "我吃了午饭想看看还差多少热量",
+        "expected": "action_expert",
+        "predicted": "action_expert",
+        "match": true
+      },
+      {
+        "query": "记一下",
+        "expected": "slot_filler",
+        "predicted": "FINISH",
+        "match": false
+      }
+    ]
+  },
+  "parser": {
+    "total_items": 29,
+    "name_accuracy": 100.0,
+    "grams_accuracy": 96.6,
+    "avg_grams_error_pct": 3.4
+  },
+  "compression": {
+    "cases": 2,
+    "avg_key_retention_pct": 100.0,
+    "finish_signal_preserved": true,
+    "last_human_preserved": true,
+    "details": [
+      {
+        "name": "糖尿病完整对话",
+        "total_msgs": 10,
+        "tokens": 66,
+        "l1": 10,
+        "l2": 0,
+        "l3": 0,
+        "finish_preserved": true,
+        "human_preserved": true,
+        "key_retention_pct": 100.0
+      },
+      {
+        "name": "痛风+高血压复合",
+        "total_msgs": 8,
+        "tokens": 54,
+        "l1": 8,
+        "l2": 0,
+        "l3": 0,
+        "finish_preserved": true,
+        "human_preserved": true,
+        "key_retention_pct": 100.0
+      }
+    ]
+  },
+  "preprocess": {
+    "total_rules": 9,
+    "rules_found": 9,
+    "completeness_pct": 100.0
+  }
+}
