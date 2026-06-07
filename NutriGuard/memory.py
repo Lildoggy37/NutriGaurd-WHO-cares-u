@@ -204,3 +204,77 @@ def load_long_term_memory(user_id: str) -> dict:
         return _load(user_id)
     except Exception:
         return {}
+
+
+# ============================================================
+#  MemoryHarness — 统一记忆接口（三层自动路由）
+# ============================================================
+
+class MemoryHarness:
+    """
+    统一记忆接口，封装 Redis 热缓存 + SQLite 冷存储 + 压缩后的消息重写。
+
+    用法:
+        mem = MemoryHarness(redis_client)
+        await mem.save_session(session_id, messages, profile)
+        msgs, profile = await mem.load_session(session_id)
+    """
+
+    def __init__(self, redis_client=None):
+        self._cache = WorkingMemoryCache(redis_client)
+
+    # ---- Session-level ---- #
+
+    def session_key(self, session_id: str) -> str:
+        return f"memory:session:{session_id}"
+
+    async def save_session(
+        self, session_id: str, messages: list, user_profile: dict
+    ) -> None:
+        """保存会话状态到 Redis (热)，异步透写到 SQLite"""
+        await self._cache.save(session_id, messages, user_profile)
+
+    def load_session(self, session_id: str) -> tuple[list, dict]:
+        """
+        恢复会话状态。先查 Redis → 未命中返回空。
+        """
+        data = self._cache.load(session_id)
+        if data:
+            return data.get("messages", []), data.get("user_profile", {})
+        return [], {}
+
+    # ---- Long-term ---- #
+
+    def save_long_term(self, user_id: str, facts: dict) -> None:
+        """写入长期记忆 (SQLite)"""
+        save_long_term_memory(user_id, facts)
+
+    def load_long_term(self, user_id: str) -> dict:
+        """读取长期记忆 (SQLite)"""
+        return load_long_term_memory(user_id)
+
+    # ---- User profile ---- #
+
+    def get_profile(self, user_id: str) -> dict:
+        """从 SQLite 读取健康画像"""
+        from db import get_health_profile
+        profile = get_health_profile(user_id)
+        return profile or {}
+
+    def update_profile(self, user_id: str, **fields) -> dict:
+        """增量更新健康画像"""
+        from db import upsert_health_profile
+        return upsert_health_profile(user_id, **fields)
+
+    # ---- Compression hook ---- #
+
+    def inject_long_term_context(self, user_profile: dict, user_id: str) -> dict:
+        """
+        压缩后调用：将长期记忆注入 user_profile，
+        使 Supervisor 路由时能感知用户历史背景。
+        """
+        ltm = self.load_long_term(user_id)
+        if ltm:
+            import json
+            user_profile["长期记忆"] = json.dumps(ltm, ensure_ascii=False)
+        return user_profile

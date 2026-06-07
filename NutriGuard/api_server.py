@@ -30,6 +30,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 from graph_brain import build_multi_agent_graph
+from memory import MemoryHarness
 
 # ==========================================
 #   1 lifespan
@@ -92,6 +93,7 @@ async def lifespan(app:FastAPI):
 
             # 4 组装 LangGraph
             app.state.graph = build_multi_agent_graph(rag_tools, action_tools)
+            app.state.memory = MemoryHarness(redis_client)
             print("[生命周期] Multi-Agent 神经网络编译完成，服务就绪。")
 
             # 5 预热 RAG 引擎（触发懒加载，避免首次用户请求等待 30s）

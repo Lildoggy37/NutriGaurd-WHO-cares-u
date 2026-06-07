@@ -25,6 +25,7 @@ from monitoring import (
     rag_search_total, rag_cache_hit_total, rag_cache_miss_total,
     rag_search_duration, rag_engine_ready,
 )
+from harness import tool_harness
 
 # ============================
 #   1. 构建MCP Redis  本地向量模型
@@ -288,6 +289,7 @@ async def save_to_cache(query: str, answer: str):
 #   class1  知识检索类 read-only
 # ============================
 @mcp.tool()
+@tool_harness(name="search_diet_guidelines", timeout_seconds=30, fallback_msg="膳食指南检索暂时不可用，请稍后重试")
 async def search_diet_guidelines(query: str) -> str:
     """
     专门用于查询《中国居民膳食指南》和普适性营养原则。
@@ -310,6 +312,7 @@ async def search_diet_guidelines(query: str) -> str:
     return result
 
 @mcp.tool()
+@tool_harness(name="check_food_gi", timeout_seconds=20, fallback_msg="GI数据查询暂时不可用，请稍后重试")
 async def check_food_gi(food_name: str) -> str:
     """
     查询特定食物的升糖指数(GI)和血糖负荷(GL)。
@@ -330,6 +333,7 @@ async def check_food_gi(food_name: str) -> str:
     return result
 
 @mcp.tool()
+@tool_harness(name="search_medical_taboos", timeout_seconds=30, fallback_msg="疾病禁忌查询暂时不可用，请稍后重试")
 async def search_medical_taboos(disease_name: str) -> str:
     """
     查询特定慢性病（如糖尿病、痛风）的饮食禁忌。

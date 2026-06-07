@@ -20,6 +20,7 @@ from memory import (
     WORKING_MEMORY_TOKENS,
     save_long_term_memory, load_long_term_memory,
 )
+from harness import node_harness
 
 
 
@@ -107,9 +108,9 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
     route 只能是四个值之一：rag_expert / action_expert / slot_filler / FINISH"""
 
+    @node_harness(name="supervisor", retries=1, timeout_seconds=30, fallback={"next_node": "FINISH"})
     async def supervisor_node(state: AgentState):
         print("[Supervisor] 正在审视意图...")
-
         messages = state["messages"]
         last_msg = messages[-1] if messages else None
 
@@ -170,6 +171,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    4. worker node
     # =====================================
 
+    @node_harness(name="rag_expert", retries=1, timeout_seconds=60, fallback={"next_node": "FINISH"})
     async def rag_expert_node(state: AgentState):
         print("📖 [RAG Expert] 正在思考并调用工具...")
         try:
@@ -180,6 +182,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             error_msg = SystemMessage(content="【系统提示】抱歉，医学知识库当前响应超时，请稍后再试或换个问法。", name="rag_expert")
             return {"messages": [error_msg], "next_node": "supervisor"}
 
+    @node_harness(name="action_expert", retries=1, timeout_seconds=60, fallback={"next_node": "FINISH"})
     async def action_expert_node(state: AgentState):
         print("🛠️ [Action Expert] 正在调用后台系统...")
         try:
@@ -203,6 +206,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     - 用户说"帮我查一下饮食" → 追问"请问您想了解哪方面的饮食信息？比如特定疾病（糖尿病/痛风）的禁忌，还是日常营养搭配？"
     - 用户说"我身高175" → 追问"好的，请问您的体重是多少呢？另外有已知的健康状况吗（如糖尿病、高血压）？" """
 
+    @node_harness(name="slot_filler", retries=0, timeout_seconds=15, fallback={"next_node": "FINISH"})
     async def slot_filler_node(state: AgentState):
         print("[Slot Filler] 正在生成追问...", flush=True)
         messages = [SystemMessage(content=SLOT_FILLER_PROMPT)] + state["messages"]
@@ -232,6 +236,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
     输出格式：只输出改写后的问题文本，不要附加任何解释或 JSON。"""
 
+    @node_harness(name="preprocess", retries=0, timeout_seconds=10, fallback={"next_node": "supervisor"})
     async def preprocess_node(state: AgentState):
         messages = state["messages"]
         # 找到最后一条 HumanMessage
