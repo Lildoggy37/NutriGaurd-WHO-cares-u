@@ -9,6 +9,27 @@ from redis.commands.search.field import TextField, VectorField
 from redis.commands.search.index_definition import IndexDefinition, IndexType
 from redis.commands.search.query import Query
 
+# BM25 离线加载补丁：绕过 fastembed 的 HF API 校验，直接使用本地缓存
+import os as _os
+_BM25_SNAP = _os.path.join(
+    _os.path.expanduser("~"),
+    ".cache/huggingface/hub/models--Qdrant--bm25/snapshots"
+)
+if _os.path.isdir(_BM25_SNAP):
+    _snaps = sorted(_os.listdir(_BM25_SNAP), reverse=True)
+    if _snaps:
+        _BM25_PATH = _os.path.join(_BM25_SNAP, _snaps[0])
+        from fastembed.common.model_management import ModelManagement as _MM
+        _orig_dm = _MM.download_model
+        @classmethod
+        def _patched_dm(cls, model_desc, cache_dir=None, local_files_only=False, **kw):
+            if "bm25" in str(getattr(model_desc, "model", model_desc)).lower():
+                from pathlib import Path
+                return Path(_BM25_PATH)
+            return _orig_dm.__func__(cls, model_desc, cache_dir=cache_dir,
+                                     local_files_only=local_files_only, **kw)
+        _MM.download_model = _patched_dm
+
 from fastmcp import FastMCP
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import MarkdownHeaderTextSplitter

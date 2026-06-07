@@ -1,23 +1,22 @@
 # NutriGuard 全维度离线评测报告
-**时间**: 2026-06-07 14:57:17
-**RAG**: 100 queries, cached
-**路由**: LLM (90.0%)
+**时间**: 2026-06-07 15:23:27
+**RAG**: 100 queries, live
+**路由**: rule (85.0%)
 
 ## 1. RAG 检索
 
 | 指标 | 值 |
 |------|-----|
-| Recall@3 | **90.0%** |
-| MRR | **0.9** |
-| NDCG@3 | **0.861** |
+| Recall@3 | **85.0%** |
+| MRR | **0.7717** |
+| NDCG@3 | **1.14** |
 
 
 ## 2. Supervisor 路由
 
 | 方法 | 样本 | 准确率 |
 |------|------|--------|
-| LLM | 20 | **90.0%** |
-| LLM 延迟 | — | 1.65s |
+| rule | 20 | **85.0%** |
 
 ## 3. 食物解析器
 
@@ -46,8 +45,8 @@
 ## Resume Card
 
 ```
-RAG:    Recall@3=90.0% MRR=0.9 NDCG@3=0.861
-Routing:90.0% (LLM)
+RAG:    Recall@3=85.0% MRR=0.7717 NDCG@3=1.14
+Routing:85.0% (rule)
 Parser: Name 100.0% | Grams 96.6%
 Compress:100.0% (6 scenarios)
 Preprocess:100.0%

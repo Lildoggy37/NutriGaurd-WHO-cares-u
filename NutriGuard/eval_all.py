@@ -15,7 +15,7 @@ NutriGuard 全维度离线评测。
 运行：python eval_all.py [--live] [--cv 5]
 输出：eval_report.json + EVAL_REPORT.md
 """
-import os, sys, json, time, statistics, re, argparse
+import os, sys, json, time, statistics, re, argparse, math
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -23,6 +23,24 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+
+# BM25 离线加载补丁
+_BM25_SNAP_EVAL = os.path.join(os.path.expanduser("~"),
+    ".cache/huggingface/hub/models--Qdrant--bm25/snapshots")
+if os.path.isdir(_BM25_SNAP_EVAL):
+    _snaps_eval = sorted(os.listdir(_BM25_SNAP_EVAL), reverse=True)
+    if _snaps_eval:
+        _BM25_PATH_EVAL = os.path.join(_BM25_SNAP_EVAL, _snaps_eval[0])
+        from fastembed.common.model_management import ModelManagement as _MM2
+        _orig_dm2 = _MM2.download_model
+        @classmethod
+        def _patched_eval(cls, model_desc, cache_dir=None, local_files_only=False, **kw):
+            if "bm25" in str(getattr(model_desc, "model", model_desc)).lower():
+                from pathlib import Path
+                return Path(_BM25_PATH_EVAL)
+            return _orig_dm2.__func__(cls, model_desc, cache_dir=cache_dir,
+                                      local_files_only=local_files_only, **kw)
+        _MM2.download_model = _patched_eval
 
 import numpy as np
 
@@ -82,12 +100,20 @@ def run_rag(cv_folds=0):
     if not os.path.isdir(bge_path):
         return _cached_rag("models not found")
 
+    embedder = HuggingFaceEmbeddings(model_name=bge_path)
     try:
-        embedder = HuggingFaceEmbeddings(model_name=bge_path)
         sparse = FastEmbedSparse(model_name="Qdrant/bm25")
-        reranker = CrossEncoder(reranker_path)
+        hybrid = True
     except Exception:
-        return _cached_rag("model load failed")
+        sparse = None
+        hybrid = False
+        print("    BM25 不可用, 降级为 Dense-only 检索")
+
+    if not os.path.isdir(reranker_path):
+        reranker = None
+        print("    Reranker 未安装, 跳过精排")
+    else:
+        reranker = CrossEncoder(reranker_path)
 
     with open(corpus_path, "r", encoding="utf-8") as f:
         corpus = f.read()
@@ -97,13 +123,20 @@ def run_rag(cv_folds=0):
         location=":memory:", collection_name="eval_rag_cv", retrieval_mode="hybrid")
     retriever = vs.as_retriever(search_kwargs={"k":10})
 
+    print(f"    Mode: {'Hybrid(Dense+BM25)' if hybrid else 'Dense-only'} + {'Reranker' if reranker else 'NoRerank'}")
+
     def _eval_split(qlist):
-        rec3, mrr_l, ndcg_l, = [], [], []
+        rec3, mrr_l, ndcg_l, latencies = [], [], [], []
         for query, primary_kw, all_kw, cat in qlist:
+            t0 = time.time()
             rough = retriever.invoke(query)
-            pairs = [[query, d.page_content] for d in rough]
-            scores = reranker.predict(pairs)
-            scored = sorted(zip(rough, scores), key=lambda x: x[1], reverse=True)
+            if reranker and rough:
+                pairs = [[query, d.page_content] for d in rough]
+                scores = reranker.predict(pairs)
+                scored = sorted(zip(rough, scores), key=lambda x: x[1], reverse=True)
+            else:
+                scored = [(d, 0.5) for d in rough]  # no rerank, use dummy scores
+            latencies.append(time.time() - t0)
             def hit(k, kw_set):
                 for i in range(min(k, len(scored))):
                     if any(kw in scored[i][0].page_content for kw in kw_set):
@@ -112,9 +145,9 @@ def run_rag(cv_folds=0):
             r3 = hit(3, set(all_kw))
             rec3.append(1 if r3!=-1 else 0)
             mrr_l.append(1.0/r3 if r3!=-1 else 0.0)
-            dcg = sum(1.0/(2.0**i) for i in range(min(3,len(scored)))
+            dcg = sum(1.0/math.log2(i+2) for i in range(min(3,len(scored)))
                       if any(kw in scored[i][0].page_content for kw in all_kw))
-            ndcg_l.append(dcg/1.0 if dcg>0 else 0.0)
+            ndcg_l.append(dcg if dcg>0 else 0.0)  # IDCG=1 with single relevant doc
         return {"recall_at_3":round(mean(rec3)*100,1),"mrr":round(mean(mrr_l),4),
             "ndcg_at_3":round(mean(ndcg_l),4),"missed":rec3.count(0),"n":len(qlist)}
 
