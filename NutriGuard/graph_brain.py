@@ -21,6 +21,7 @@ from memory import (
     save_long_term_memory, load_long_term_memory,
 )
 from harness import node_harness
+from monitoring import record_tokens
 
 
 
@@ -149,6 +150,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         try:
             response = await llm.ainvoke(llm_input)
+            record_tokens("supervisor", response.response_metadata.get("token_usage", {}))
             raw = str(response.content) if response.content else ""
             if not raw.strip():
                 raise ValueError("LLM returned empty content")
@@ -212,6 +214,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         messages = [SystemMessage(content=SLOT_FILLER_PROMPT)] + state["messages"]
         try:
             response = await llm.ainvoke(messages)
+            record_tokens("slot_filler", response.response_metadata.get("token_usage", {}))
             return {"messages": [response], "next_node": "FINISH"}
         except Exception as e:
             print(f"[Slot Filler 异常] {e}", flush=True)
@@ -260,6 +263,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 SystemMessage(content=PREPROCESS_PROMPT),
                 HumanMessage(content=f"用户原始输入：{raw}"),
             ])
+            record_tokens("preprocess", response.response_metadata.get("token_usage", {}))
             rewritten = str(response.content).strip()
 
             if rewritten and rewritten != raw:
@@ -339,6 +343,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         try:
             response = await llm.ainvoke([SystemMessage(content=review_prompt)])
+            record_tokens("rag_reflection", response.response_metadata.get("token_usage", {}))
             json_str = _extract_json(str(response.content))
             verdict = ReflectionVerdict.model_validate_json(json_str)
             # 规范化 risk_items（qwen 可能返回列表）
@@ -432,6 +437,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                     extraction_response = await llm.ainvoke([
                         SystemMessage(content=extraction_prompt),
                     ])
+                    record_tokens("memory_compressor_L3", extraction_response.response_metadata.get("token_usage", {}))
                     facts_raw = _extract_json(str(extraction_response.content))
                     facts = json.loads(facts_raw)
                     save_long_term_memory(user_id, facts)
@@ -448,6 +454,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                     summary_response = await llm.ainvoke([
                         SystemMessage(content=summary_prompt),
                     ])
+                    record_tokens("memory_compressor_L2", summary_response.response_metadata.get("token_usage", {}))
                     summary_text = str(summary_response.content)[:200]
                     current_profile["对话摘要"] = summary_text
                     print(f"[Memory] Layer 2: 压缩 {len(layer_middle)} 条 -> 摘要")

@@ -111,6 +111,27 @@ llm_call_errors = Counter(
 )
 
 # ============================================================
+#  5. Token 消耗
+# ============================================================
+llm_token_total = Counter(
+    "llm_token_total",
+    "LLM Token 消耗总数",
+    ["model", "node", "direction"],
+    registry=registry,
+)
+
+
+def record_tokens(node: str, usage: dict, model: str = "qwen-plus"):
+    """从 response_metadata.token_usage 记录 Token 消耗"""
+    if not usage:
+        return
+    for direction, key in [("input", "prompt_tokens"), ("output", "completion_tokens")]:
+        count = usage.get(key, 0)
+        if count:
+            llm_token_total.labels(model=model, node=node, direction=direction).inc(count)
+
+
+# ============================================================
 #  导出
 # ============================================================
 def get_metrics():
