@@ -1,47 +1,47 @@
 {
-  "timestamp": "2026-06-09 22:53:48",
+  "timestamp": "2026-06-09 23:13:47",
   "queries": 5,
   "metrics": {
     "avg_faithfulness": 1.0,
-    "avg_answer_relevancy": 0.687,
-    "avg_context_precision": 0.4,
-    "avg_context_recall": 0.7
+    "avg_answer_relevancy": 0.66,
+    "avg_context_precision": 0.667,
+    "avg_context_recall": 0.733
   },
   "details": [
     {
       "query": "糖尿病人的饮食禁忌有哪些？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.567,
-      "context_precision": 0.5,
+      "answer_relevancy": 0.433,
+      "context_precision": 0.667,
       "context_recall": 0.75
     },
     {
       "query": "痛风患者应该避免什么食物？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.6,
-      "context_precision": 0.5,
+      "answer_relevancy": 0.567,
+      "context_precision": 1.0,
       "context_recall": 0.75
     },
     {
       "query": "鸡胸肉每100g的蛋白质含量是多少？",
       "faithfulness": 1.0,
       "answer_relevancy": 0.767,
-      "context_precision": 0.5,
-      "context_recall": 1.0
+      "context_precision": 0.333,
+      "context_recall": 0.667
     },
     {
       "query": "尿酸高了吃什么不好？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.6,
-      "context_precision": 0.5,
+      "answer_relevancy": 0.767,
+      "context_precision": 1.0,
       "context_recall": 1.0
     },
     {
       "query": "太胖了想减肥，每天应该吃多少热量？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.9,
-      "context_precision": 0.0,
-      "context_recall": 0.0
+      "answer_relevancy": 0.767,
+      "context_precision": 0.333,
+      "context_recall": 0.5
     }
   ]
 }

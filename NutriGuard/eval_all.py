@@ -117,8 +117,8 @@ def run_rag(cv_folds=0):
 
     with open(corpus_path, "r", encoding="utf-8") as f:
         corpus = f.read()
-    splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("##","Chapter"),("###","Section")])
-    docs = splitter.split_text(corpus)
+    from chunking import chunk_document
+    docs = chunk_document(corpus)
     vs = QdrantVectorStore.from_documents(docs, embedding=embedder, sparse_embedding=sparse,
         location=":memory:", collection_name="eval_rag_cv", retrieval_mode="hybrid")
     retriever = vs.as_retriever(search_kwargs={"k":10})

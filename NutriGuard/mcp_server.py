@@ -32,8 +32,8 @@ if _os.path.isdir(_BM25_SNAP):
 
 from fastmcp import FastMCP
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_qdrant import QdrantVectorStore, FastEmbedSparse
+from chunking import chunk_document
 from sentence_transformers import CrossEncoder
 
 from db import (
@@ -113,10 +113,8 @@ async def _init_rag_engine_async():
         t3 = time.time()
         with open(CORPUS_PATH, "r", encoding="utf-8") as f:
             markdown_document = f.read()
-        headers_to_split_on = [("##", "Chapter"), ("###", "Section")]
-        markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_split_on)
-        docs = markdown_splitter.split_text(markdown_document)
-        print(f"  [RAG-init] 语料分块完成: {len(docs)} 块 ({time.time()-t3:.1f}s)", file=sys.stderr)
+        docs = chunk_document(markdown_document)
+        print(f"  [RAG-init] 分块完成: {len(docs)} 块 (512ch+128ov) ({time.time()-t3:.1f}s)", file=sys.stderr)
 
         t4 = time.time()
         _vectorstore = QdrantVectorStore.from_documents(

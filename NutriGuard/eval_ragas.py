@@ -162,7 +162,7 @@ def load_rag():
     from langchain_huggingface import HuggingFaceEmbeddings
     from langchain_qdrant import QdrantVectorStore, FastEmbedSparse
     from sentence_transformers import CrossEncoder
-    from langchain_text_splitters import MarkdownHeaderTextSplitter
+    from chunking import chunk_document as _cd2
 
     bge_path = os.path.join(BASE_DIR, "models", "bge-large-zh-v1.5")
     reranker_path = os.path.join(BASE_DIR, "models", "bge-reranker-v2-m3")
@@ -174,8 +174,7 @@ def load_rag():
 
     with open(corpus_path, "r", encoding="utf-8") as f:
         corpus = f.read()
-    splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("##","Chapter"),("###","Section")])
-    docs = splitter.split_text(corpus)
+    docs = _cd2(corpus)
     vs = QdrantVectorStore.from_documents(docs, embedding=embedder, sparse_embedding=sparse,
         location=":memory:", collection_name="eval_ragas", retrieval_mode="hybrid")
     retriever = vs.as_retriever(search_kwargs={"k": 10})
@@ -196,11 +195,10 @@ async def main():
     print("  OK")
 
     # Build neighbor map for chunk expansion (2b: prevent fragmentation)
-    from langchain_text_splitters import MarkdownHeaderTextSplitter
+    from chunking import chunk_document
     with open(os.path.join(BASE_DIR, "data", "mock_corpus.md"), "r", encoding="utf-8") as f:
         raw_corpus = f.read()
-    splitter = MarkdownHeaderTextSplitter(headers_to_split_on=[("##","Chapter"),("###","Section")])
-    ordered_docs = splitter.split_text(raw_corpus)  # ordered list for neighbor lookup
+    ordered_docs = chunk_document(raw_corpus)  # ordered list for neighbor lookup
 
     def get_neighbor(doc, offset=1):
         """Get adjacent chunk by matching content prefix"""
