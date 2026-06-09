@@ -1,82 +1,47 @@
 {
-  "timestamp": "2026-06-09 21:39:12",
-  "queries": 10,
+  "timestamp": "2026-06-09 22:53:48",
+  "queries": 5,
   "metrics": {
-    "avg_faithfulness": 0.572,
-    "avg_answer_relevancy": 0.643,
-    "avg_context_precision": 0.467,
-    "avg_context_recall": 0.742
+    "avg_faithfulness": 1.0,
+    "avg_answer_relevancy": 0.687,
+    "avg_context_precision": 0.4,
+    "avg_context_recall": 0.7
   },
   "details": [
     {
       "query": "糖尿病人的饮食禁忌有哪些？",
-      "faithfulness": 0.0,
-      "answer_relevancy": 0.7,
-      "context_precision": 0.667,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.567,
+      "context_precision": 0.5,
       "context_recall": 0.75
     },
     {
       "query": "痛风患者应该避免什么食物？",
       "faithfulness": 1.0,
       "answer_relevancy": 0.6,
-      "context_precision": 1.0,
+      "context_precision": 0.5,
       "context_recall": 0.75
-    },
-    {
-      "query": "孕妇查出高血糖，吃东西要注意啥？",
-      "faithfulness": 1.0,
-      "answer_relevancy": 0.8,
-      "context_precision": 0.333,
-      "context_recall": 0.5
     },
     {
       "query": "鸡胸肉每100g的蛋白质含量是多少？",
       "faithfulness": 1.0,
       "answer_relevancy": 0.767,
-      "context_precision": 0.0,
+      "context_precision": 0.5,
       "context_recall": 1.0
-    },
-    {
-      "query": "高血压DASH饮食的核心原则是什么？",
-      "faithfulness": 1.0,
-      "answer_relevancy": 0.533,
-      "context_precision": 0.333,
-      "context_recall": 0.75
     },
     {
       "query": "尿酸高了吃什么不好？",
-      "faithfulness": 0.0,
-      "answer_relevancy": 0.733,
-      "context_precision": 0.667,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6,
+      "context_precision": 0.5,
       "context_recall": 1.0
-    },
-    {
-      "query": "帮我记录午餐：糙米饭150g,鸡胸肉200g",
-      "faithfulness": 0.923,
-      "answer_relevancy": 0.2,
-      "context_precision": 0.333,
-      "context_recall": 0.667
     },
     {
       "query": "太胖了想减肥，每天应该吃多少热量？",
-      "faithfulness": 0.8,
-      "answer_relevancy": 0.833,
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.9,
       "context_precision": 0.0,
       "context_recall": 0.0
-    },
-    {
-      "query": "老年人肌肉流失怎么通过饮食改善？",
-      "faithfulness": 0.0,
-      "answer_relevancy": 0.733,
-      "context_precision": 0.667,
-      "context_recall": 1.0
-    },
-    {
-      "query": "今天吃了燕麦片和鸡蛋，营养均衡吗？",
-      "faithfulness": 0.0,
-      "answer_relevancy": 0.533,
-      "context_precision": 0.667,
-      "context_recall": 1.0
     }
   ]
 }
