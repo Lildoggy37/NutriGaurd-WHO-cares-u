@@ -1,8 +1,10 @@
 """
-统一执行框架 — 节点 Harness + 工具 Harness。
+统一执行框架 — 节点 Harness + 工具 Harness + LLM 并发控制。
 
-NodeHarness:  重试 / 超时 / 兜底 / 指标 / 日志
-ToolHarness:  超时 / 熔断 / 降级链
+NodeHarness:     重试 / 超时 / 兜底 / 指标 / 日志
+ToolHarness:     超时 / 熔断 / 降级链
+LLMRateLimiter:  LLM API QPS 保护, 背压排队
+
 
 用法：
   from harness import node_harness, tool_harness
@@ -199,3 +201,61 @@ def tool_harness(name="", timeout_seconds=30, max_failures=5,
 
         return wrapper
     return decorator
+
+
+# ============================================================
+#  LLMRateLimiter — LLM API QPS 保护 + 背压排队
+# ============================================================
+
+class LLMRateLimiter:
+    """
+    异步信号量 + 令牌桶，保护 LLM API 不被突发流量打爆。
+
+    用法:
+        limiter = LLMRateLimiter(max_concurrent=5, max_per_second=10)
+
+        async with limiter:
+            response = await llm.ainvoke(...)
+
+    原理:
+      - 令牌桶控制每秒调用数 (QPS)
+      - Semaphore 控制同时进行的调用数
+      - 超过限制时请求自动排队 (背压)，不丢请求
+    """
+
+    def __init__(self, max_concurrent: int = 5, max_per_second: int = 10):
+        self._semaphore = asyncio.Semaphore(max_concurrent)
+        self._max_per_second = max_per_second
+        self._tokens = max_per_second
+        self._last_refill = time.monotonic()
+        self._lock = asyncio.Lock()
+
+    async def acquire(self):
+        async with self._lock:
+            now = time.monotonic()
+            elapsed = now - self._last_refill
+            self._tokens = min(self._max_per_second,
+                               self._tokens + int(elapsed * self._max_per_second))
+            self._last_refill = now
+            if self._tokens > 0:
+                self._tokens -= 1
+            else:
+                wait_time = 1.0 / self._max_per_second
+                await asyncio.sleep(wait_time)
+                self._tokens = self._max_per_second - 1
+                self._last_refill = time.monotonic()
+        await self._semaphore.acquire()
+
+    def release(self):
+        self._semaphore.release()
+
+    async def __aenter__(self):
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args):
+        self.release()
+
+
+# 全局实例
+llm_rate_limiter = LLMRateLimiter(max_concurrent=5, max_per_second=10)

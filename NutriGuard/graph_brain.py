@@ -20,7 +20,7 @@ from memory import (
     WORKING_MEMORY_TOKENS,
     save_long_term_memory, load_long_term_memory,
 )
-from harness import node_harness
+from harness import node_harness, llm_rate_limiter
 from monitoring import record_tokens
 
 
@@ -156,7 +156,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         llm_input = [SystemMessage(content=sys_prompt)] + clean
 
         try:
-            response = await llm.ainvoke(llm_input)
+            async with llm_rate_limiter:
+                response = await llm.ainvoke(llm_input)
             record_tokens("supervisor", response.response_metadata.get("token_usage", {}))
             raw = str(response.content) if response.content else ""
             if not raw.strip():
@@ -220,7 +221,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         print("[Slot Filler] 正在生成追问...", flush=True)
         messages = [SystemMessage(content=SLOT_FILLER_PROMPT)] + state["messages"]
         try:
-            response = await llm.ainvoke(messages)
+            async with llm_rate_limiter:
+                response = await llm.ainvoke(messages)
             record_tokens("slot_filler", response.response_metadata.get("token_usage", {}))
             return {"messages": [response], "next_node": "FINISH"}
         except Exception as e:
@@ -266,7 +268,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
         print(f"[Preprocess] 原始输入: {raw[:60]}...", flush=True)
         try:
-            response = await llm.ainvoke([
+            async with llm_rate_limiter:
+                response = await llm.ainvoke([
                 SystemMessage(content=PREPROCESS_PROMPT),
                 HumanMessage(content=f"用户原始输入：{raw}"),
             ])
@@ -349,7 +352,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         {{"verdict": "<PASS|CORRECT|REJECT>", "reason": "判定理由", "risk_items": "风险点（若无则留空）"}}"""
 
         try:
-            response = await llm.ainvoke([SystemMessage(content=review_prompt)])
+            async with llm_rate_limiter:
+                response = await llm.ainvoke([SystemMessage(content=review_prompt)])
             record_tokens("rag_reflection", response.response_metadata.get("token_usage", {}))
             json_str = _extract_json(str(response.content))
             verdict = ReflectionVerdict.model_validate_json(json_str)
@@ -441,7 +445,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 old_text = format_messages_for_llm(layer_old)
                 extraction_prompt = build_extraction_prompt(old_text)
                 try:
-                    extraction_response = await llm.ainvoke([
+                    async with llm_rate_limiter:
+                        extraction_response = await llm.ainvoke([
                         SystemMessage(content=extraction_prompt),
                     ])
                     record_tokens("memory_compressor_L3", extraction_response.response_metadata.get("token_usage", {}))
@@ -458,7 +463,8 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 middle_text = format_messages_for_llm(layer_middle)
                 summary_prompt = build_summary_prompt(middle_text)
                 try:
-                    summary_response = await llm.ainvoke([
+                    async with llm_rate_limiter:
+                        summary_response = await llm.ainvoke([
                         SystemMessage(content=summary_prompt),
                     ])
                     record_tokens("memory_compressor_L2", summary_response.response_metadata.get("token_usage", {}))
