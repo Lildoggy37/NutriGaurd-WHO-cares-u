@@ -55,13 +55,20 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     rag_agent = create_agent(
         model=llm,
         tools=rag_tools,
-        system_prompt="你是一个营养学与 RAG 检索专家。优先调用工具查询数据，不要编造医学常识。回答客观严谨，解答完即停止，不要主动追问或提出新话题。"
+        system_prompt=(
+            "你是一个营养学与 RAG 检索专家。优先调用工具查询数据，不编造医学常识。"
+            "回答客观严谨，解答完即停止，不主动追问。"
+            "如果需要查询多个信息（如同时查指南和GI），一次性调用多个工具以提高效率。"
+        )
     )
 
     action_agent = create_agent(
         model=llm,
         tools=action_tools,
-        system_prompt="你是一个严谨的健康管家。调用工具完成用户请求的操作后，简洁确认即可。不要主动追问或提出新话题，让用户自行决定下一步。"
+        system_prompt=(
+            "你是一个严谨的健康管家。调用工具完成操作后简洁确认，不主动追问。"
+            "如果需要同时记录饮食和计算热量，一次性调用多个工具以提高效率。"
+        )
     )
 
     # =====================================
