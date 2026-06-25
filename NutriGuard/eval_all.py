@@ -75,6 +75,52 @@ def _cv_splits(queries, k=5):
 
 
 # ============================================================
+#  AI Recall 标注 (--ai-label)
+# ============================================================
+AI_RECALL_PROMPT = """判断以下 3 个文本片段是否与用户问题相关。只输出一行 JSON 数组:
+{"relevant":[true/false,true/false,true/false]}
+
+【问题】{question}
+【片段1】{c1}
+【片段2】{c2}
+【片段3】{c3}"""
+
+
+async def _ai_hit(question: str, top3_chunks: list[str]) -> int:
+    """AI 判定 Recall: Top-3 中第几个最先命中，全 miss→-1"""
+    if not top3_chunks:
+        return -1
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(BASE_DIR, "..", ".env"))
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import SystemMessage
+
+    llm = ChatOpenAI(model="qwen-plus", temperature=0.0,
+        api_key=os.getenv("DASHSCOPE_API_KEY"),
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1")
+    prompt = AI_RECALL_PROMPT.format(
+        question=question,
+        c1=top3_chunks[0][:400] if len(top3_chunks)>0 else "",
+        c2=top3_chunks[1][:400] if len(top3_chunks)>1 else "",
+        c3=top3_chunks[2][:400] if len(top3_chunks)>2 else "",
+    )
+    try:
+        resp = await llm.ainvoke([SystemMessage(content=prompt)])
+        m = re.search(r'\{[\s\S]*\}', str(resp.content))
+        if m:
+            relevant = json.loads(m.group(0)).get("relevant", [])
+            for i, r in enumerate(relevant):
+                if r is True or str(r).lower() == "true":
+                    return i + 1
+    except Exception:
+        pass
+    return -1
+
+
+USE_AI_LABEL = False  # 全局开关, main() 中通过 --ai-label 设置
+
+
+# ============================================================
 #  1. RAG 检索评测 (+ 5-fold CV)
 # ============================================================
 def run_rag(cv_folds=0):
@@ -126,6 +172,7 @@ def run_rag(cv_folds=0):
     print(f"    Mode: {'Hybrid(Dense+BM25)' if hybrid else 'Dense-only'} + {'Reranker' if reranker else 'NoRerank'}")
 
     def _eval_split(qlist):
+        import asyncio
         rec3, mrr_l, ndcg_l, latencies = [], [], [], []
         for query, primary_kw, all_kw, cat in qlist:
             t0 = time.time()
@@ -135,19 +182,29 @@ def run_rag(cv_folds=0):
                 scores = reranker.predict(pairs)
                 scored = sorted(zip(rough, scores), key=lambda x: x[1], reverse=True)
             else:
-                scored = [(d, 0.5) for d in rough]  # no rerank, use dummy scores
+                scored = [(d, 0.5) for d in rough]
             latencies.append(time.time() - t0)
-            def hit(k, kw_set):
-                for i in range(min(k, len(scored))):
-                    if any(kw in scored[i][0].page_content for kw in kw_set):
-                        return i+1
-                return -1
-            r3 = hit(3, set(all_kw))
+
+            # Recall 判定: AI 标注 或 关键词匹配
+            if USE_AI_LABEL:
+                top3_texts = [d.page_content for d, _ in scored[:3]]
+                r3 = asyncio.run(_ai_hit(query, top3_texts))
+            else:
+                def hit(k, kw_set):
+                    for i in range(min(k, len(scored))):
+                        if any(kw in scored[i][0].page_content for kw in kw_set):
+                            return i+1
+                    return -1
+                r3 = hit(3, set(all_kw))
+
             rec3.append(1 if r3!=-1 else 0)
             mrr_l.append(1.0/r3 if r3!=-1 else 0.0)
-            dcg = sum(1.0/math.log2(i+2) for i in range(min(3,len(scored)))
-                      if any(kw in scored[i][0].page_content for kw in all_kw))
-            ndcg_l.append(dcg if dcg>0 else 0.0)  # IDCG=1 with single relevant doc
+            if USE_AI_LABEL:
+                dcg = 1.0/math.log2(r3+1) if r3!=-1 else 0.0
+            else:
+                dcg = sum(1.0/math.log2(i+2) for i in range(min(3,len(scored)))
+                          if any(kw in scored[i][0].page_content for kw in all_kw))
+            ndcg_l.append(dcg if dcg>0 else 0.0)
         return {"recall_at_3":round(mean(rec3)*100,1),"mrr":round(mean(mrr_l),4),
             "ndcg_at_3":round(mean(ndcg_l),4),"missed":rec3.count(0),"n":len(qlist)}
 
@@ -425,7 +482,10 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--live", action="store_true", help="LLM CoT routing")
     p.add_argument("--cv", type=int, default=0, help="RAG N-fold CV (0=full)")
+    p.add_argument("--ai-label", action="store_true", help="AI Recall annotation (LLM-as-judge)")
     args = p.parse_args()
+    global USE_AI_LABEL
+    USE_AI_LABEL = args.ai_label
 
     t0 = time.time()
     print("="*60); print("NutriGuard 全维度离线评测"); print("="*60)
@@ -438,7 +498,8 @@ def main():
 
     print("\n"+"="*60); print("SUMMARY"); print("="*60)
     cv_tag = f" {args.cv}-fold CV" if args.cv else ""
-    print(f"RAG:       Recall@3={rag['recall_at_3']}% MRR={rag['mrr']} NDCG@3={rag['ndcg_at_3']}{cv_tag}")
+    label_tag = " [AI-label]" if USE_AI_LABEL else " [keyword]"
+    print(f"RAG:       Recall@3={rag['recall_at_3']}% MRR={rag['mrr']} NDCG@3={rag['ndcg_at_3']}{cv_tag}{label_tag}")
     print(f"Routing:   {routing['accuracy']}% ({routing['method']})")
     print(f"Parser:    Name {parser['name_acc']}% | Grams {parser['grams_acc']}%")
     print(f"Compress:  {compression['avg_retention']}% ({compression['scenarios']} scenarios)")
