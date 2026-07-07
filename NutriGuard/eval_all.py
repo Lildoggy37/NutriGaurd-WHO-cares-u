@@ -17,8 +17,8 @@ NutriGuard 全维度离线评测。
 """
 import os, sys, json, time, statistics, re, argparse, math
 
-os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("OMP_NUM_THREADS", "4"))
+os.environ.setdefault("MKL_NUM_THREADS", os.environ.get("MKL_NUM_THREADS", "4"))
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,7 +78,7 @@ def _cv_splits(queries, k=5):
 #  AI Recall 标注 (--ai-label)
 # ============================================================
 AI_RECALL_PROMPT = """判断以下 3 个文本片段是否与用户问题相关。只输出一行 JSON 数组:
-{"relevant":[true/false,true/false,true/false]}
+{{"relevant":[true/false,true/false,true/false]}}
 
 【问题】{question}
 【片段1】{c1}
@@ -174,6 +174,9 @@ def run_rag(cv_folds=0):
     def _eval_split(qlist):
         import asyncio
         rec3, mrr_l, ndcg_l, latencies = [], [], [], []
+
+        # Phase 1: Reranker (multi-threaded, batch)
+        scored_results = []
         for query, primary_kw, all_kw, cat in qlist:
             t0 = time.time()
             rough = retriever.invoke(query)
@@ -184,27 +187,36 @@ def run_rag(cv_folds=0):
             else:
                 scored = [(d, 0.5) for d in rough]
             latencies.append(time.time() - t0)
+            scored_results.append((query, all_kw, scored))
 
-            # Recall 判定: AI 标注 或 关键词匹配
-            if USE_AI_LABEL:
-                top3_texts = [d.page_content for d, _ in scored[:3]]
-                r3 = asyncio.run(_ai_hit(query, top3_texts))
-            else:
+        # Phase 2: AI labeling (async batch — concurrent LLM calls)
+        if USE_AI_LABEL:
+            async def _batch_ai():
+                tasks = [_ai_hit(q, [d.page_content for d,_ in sc[:3]]) for q, _, sc in scored_results]
+                return await asyncio.gather(*tasks, return_exceptions=True)
+            ai_results = asyncio.run(_batch_ai())
+            for (_, _, scored), ai_r3 in zip(scored_results, ai_results):
+                r3 = ai_r3 if not isinstance(ai_r3, Exception) else -1
+                rec3.append(1 if r3!=-1 else 0)
+                mrr_l.append(1.0/r3 if r3!=-1 else 0.0)
+                dcg = 1.0/math.log2(r3+1) if r3!=-1 else 0.0
+                ndcg_l.append(dcg)
+        else:
+            for _, all_kw, scored in scored_results:
                 def hit(k, kw_set):
                     for i in range(min(k, len(scored))):
                         if any(kw in scored[i][0].page_content for kw in kw_set):
                             return i+1
                     return -1
                 r3 = hit(3, set(all_kw))
+                rec3.append(1 if r3!=-1 else 0)
+                mrr_l.append(1.0/r3 if r3!=-1 else 0.0)
+                hits = [i for i in range(min(3,len(scored)))
+                        if any(kw in scored[i][0].page_content for kw in all_kw)]
+                dcg = sum(1.0/math.log2(i+2) for i in hits)
+                idcg = sum(1.0/math.log2(i+2) for i in range(min(len(hits),3)))
+                ndcg_l.append(dcg/idcg if idcg>0 else 0.0)
 
-            rec3.append(1 if r3!=-1 else 0)
-            mrr_l.append(1.0/r3 if r3!=-1 else 0.0)
-            if USE_AI_LABEL:
-                dcg = 1.0/math.log2(r3+1) if r3!=-1 else 0.0
-            else:
-                dcg = sum(1.0/math.log2(i+2) for i in range(min(3,len(scored)))
-                          if any(kw in scored[i][0].page_content for kw in all_kw))
-            ndcg_l.append(dcg if dcg>0 else 0.0)
         return {"recall_at_3":round(mean(rec3)*100,1),"mrr":round(mean(mrr_l),4),
             "ndcg_at_3":round(mean(ndcg_l),4),"missed":rec3.count(0),"n":len(qlist)}
 

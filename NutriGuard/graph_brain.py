@@ -361,7 +361,39 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             verdict.risk_items = ReflectionVerdict._normalize_risk(verdict.risk_items)
             print(f"[Reflection] 判定: {verdict.verdict} | {verdict.reason}")
 
+            # --- 一致性校验：回答引用的用户数据 vs SQLite ---
+            consistency_note = None
+            user_id = state.get("user_profile", {}).get("用户标识", "")
+            if user_id:
+                try:
+                    from db import get_health_profile
+                    profile = get_health_profile(user_id)
+                    if profile:
+                        checks = {
+                            "身高": ("height_cm", "cm"),
+                            "体重": ("weight_kg", "kg"),
+                            "年龄": ("age", "岁"),
+                        }
+                        for label, (field, unit) in checks.items():
+                            db_val = profile.get(field)
+                            if db_val is None:
+                                continue
+                            pattern = rf"{label}[^\d]*(\d+)\s*{unit}"
+                            m = re.search(pattern, answer_text)
+                            if m and abs(int(m.group(1)) - float(db_val)) > 1:
+                                consistency_note = (
+                                    f"[数据一致性] 回答中引用的{label}({m.group(1)}{unit})"
+                                    f"与数据库记录({db_val}{unit})不一致"
+                                )
+                                print(f"[Reflection] {consistency_note}")
+                                break
+                except Exception:
+                    pass
+
             if verdict.verdict == "PASS":
+                if consistency_note:
+                    return {"messages": [SystemMessage(content=consistency_note, name="reflection")],
+                            "next_node": "supervisor"}
                 return {"next_node": "supervisor"}
 
             elif verdict.verdict == "CORRECT":

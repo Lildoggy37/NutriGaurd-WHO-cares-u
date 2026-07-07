@@ -121,7 +121,7 @@ async def _init_rag_engine_async():
             docs,
             embedding=_embedder,
             sparse_embedding=sparse_embeddings,
-            location=":memory:",
+            location=os.path.join(BASE_DIR, "data", "qdrant_storage"),
             collection_name="nutriguard_collection",
             retrieval_mode="hybrid",
         )

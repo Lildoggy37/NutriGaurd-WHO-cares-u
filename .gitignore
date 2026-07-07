@@ -10,6 +10,8 @@ __pycache__/
 4.milvus/
 5.langgraph
 NutriGuard/data/
+!NutriGuard/data/eval_rag_v2.json
+!NutriGuard/data/mock_corpus.md
 NutriGuard/models/
 NutriGuard/nutriguard.db
 # 前端构建产物

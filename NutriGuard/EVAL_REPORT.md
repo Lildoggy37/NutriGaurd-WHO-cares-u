@@ -1,5 +1,5 @@
 # NutriGuard 全维度离线评测报告
-**时间**: 2026-06-07 17:41:47
+**时间**: 2026-07-07 17:07:24
 **RAG**: 100 queries, live
 **路由**: rule (85.0%)
 
@@ -7,9 +7,9 @@
 
 | 指标 | 值 |
 |------|-----|
-| Recall@3 | **88.0%** |
-| MRR | **0.8067** |
-| NDCG@3 | **1.4599** |
+| Recall@3 | **87.0%** |
+| MRR | **0.8167** |
+| NDCG@3 | **0.8305** |
 
 
 ## 2. Supervisor 路由
@@ -45,7 +45,7 @@
 ## Resume Card
 
 ```
-RAG:    Recall@3=88.0% MRR=0.8067 NDCG@3=1.4599
+RAG:    Recall@3=87.0% MRR=0.8167 NDCG@3=0.8305
 Routing:85.0% (rule)
 Parser: Name 100.0% | Grams 96.6%
 Compress:100.0% (6 scenarios)
