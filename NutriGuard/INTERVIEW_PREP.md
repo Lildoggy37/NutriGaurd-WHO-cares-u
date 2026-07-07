@@ -590,7 +590,9 @@ Context Recall:    关键词覆盖率 → 0.654
 | 14 | 语义缓存阈值验证 | 0.85 是拍脑袋 | BGE 实测: 同病 0.91/异病 0.49, 0.85 合理 |
 | 15 | Prompt 注入防御 | 无防护 | Preprocess 正则拦截 + 3 prompt 加固 | ✅ |
 | 16 | JWT 认证授权 | user_id 自报家门 | auth.py + api/mcp 接线 + enforce_user_id | ✅ |
-| 17 | Chunk 溯源 + 增量更新 | 无 section_id, 无法追溯 | 94 chunks×41 sections SHA256 标记, Reflection 溯源校验 | ✅ |
+| 17 | Chunk 溯源 + 增量更新 | 无 section_id 标记 | 94 chunks×41 sections SHA256 标记, Reflection 溯源校验 | ✅ |
+| 18 | MCP 健康监控 | 子进程崩溃无法恢复 | 30s 心跳 ping + 自动重启子进程+重建图 | ✅ |
+| 19 | 语料热更新 | 改文件需重启 | mtime 检测→hash diff→增量重索引, 零停机 | ✅ |
 
 ---
 
@@ -791,7 +793,7 @@ Context Recall:    关键词覆盖率 → 0.654
 | 冲突 | 记忆 last-write-wins, 无冲突检测 | 用户数据覆盖风险 | timestamp 比较 + 追问 |
 | 过期 | 长期记忆永不过期 | 过时数据污染 | access_count + 自动归档 |
 | 一致性 | 无 Agent 引用 vs 实际数据校验 | 幻觉风险 | verify_memory_consistency 节点 |
-| 语料 | 65K 字, 9 章 51 节, 但发布频率未闭环 | 新增疾病/药物互动/FAQ 已扩充, 待增量更新机制 | 增量 Hash 更新 + 定时爬取新指南 |
+| 语料 | 65K 字, 9 章 51 节, 热更新已实现 | mtime 检测→hash diff→增量重索引 (无需重启) | ✅ |
 | 路由 | Supervisor 偶尔误判（~10%） | 对话体验 | CoT 已提升到 90%, 进一步调 prompt |
 | 评测 | 被测集仅 100 条, 压缩场景仅 6 条 | 统计意义有限 | 持续扩充基准集 |
 

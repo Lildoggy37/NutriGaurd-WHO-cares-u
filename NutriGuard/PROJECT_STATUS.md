@@ -35,10 +35,11 @@
 | 长期记忆 | SQLite long_term_memories | KV 结构/全量加载 | ✓ 压缩评测 | 6 场景，留存率 100% | 全量注入 prompt，量大后需向量召回 |
 | 工作记忆 | Redis working_memory | 1h TTL/重启恢复 | △ 功能验证 | 最近 20 条消息 | 需 Redis 在线，离线退 MemorySaver |
 | 多 Agent 框架 | LangGraph Supervisor | 显式路由/状态管理/checkpointer | ✓ 14 个 pytest | 图拓扑(4)+路由(4)+AgentState(3)+压缩(3) | Qwen role 交替校验需大量兼容代码 |
-| 工具协议 | MCP (stdio) | 自动工具发现/零网络延迟 | ✓ func test | 8 个工具按职能隔离 | 子进程崩溃无自动重启 |
+| 工具协议 | MCP (stdio) + 健康监控 | 自动工具发现/零网络延迟/30s 心跳+自动重启 | ✓ 14 个 pytest | 8 个工具按职能隔离, 崩溃自动恢复 | ✅ health monitor 已加 |
 | 合规审查 | Reflection 节点 | 幻觉/安全/完整性+用户数据一致性校验 | ✓ RAGAS Faithfulness 0.854 | 24 条分层抽样 | ✅ 已加身高/体重/年龄交叉校验 |
 | 意图预处理 | Preprocess 节点 | 纠错/同义词展开/指代消解 | ✓ prompt 检查 | 9/9 规则完整 | ≤10 字跳过，长查询改写质量依赖 LLM |
-| Chunking | 512ch+128ov+元数据+section_id+SHA256 | 固定大小/防截断/章节感知/溯源/增量更新 | ✓ RAGAS | 94 chunks, 41 sections, Precision 0.40→0.667 (+67%) | ✅ section_id+hash 已完成 |
+| Chunking | 512ch+128ov+metadata+section_id+SHA256 | 固定大小/防截断/章节感知/溯源 | ✓ RAGAS | 94 chunks, 41 sections | ✅ |
+| 语料热更新 | mtime 检测 + SHA256 diff | 文件修改→自动增量重索引, 无 Admin API | ✓ func test | 只重索引变更 section | ✅ |
 | Token 追踪 | llm_token_total Counter | 输入/输出按节点统计 | ✓ func test | 6 个节点埋点 | 工具内 LLM 调用未纳入 |
 | Harness | NodeHarness+ToolHarness+LLMRateLimiter | 重试/超时/熔断/并发控制 | ✓ 14 个 pytest 通过 | retry×2, timeout10-60s, QPS10+并发5 | 429 限流未特殊处理退避 |
 | Prompt 注入防御 | Preprocess 正则 + System Prompt 加固 | 10 个注入模式 → FINISH, 3 个 prompt 加固 | ✓ 14 个 pytest 通过 | 注入检测在路由前拦截 | 对抗性 prompt 未充分测试 |
@@ -119,7 +120,9 @@
 | 14 | RAGAS 5→24 条 | Faithfulness=1.0 太假 | 1.000 (5Q) | 0.854 (24Q) | ✅ 更真实 |
 | 15 | Prompt 注入防御 | 无防护 | 无 | Preprocess 正则拦截 + 3 prompt 加固 | ✅ |
 | 16 | JWT 认证授权 | user_id 自报家门 | 无 | auth.py + api/mcp 接线 + enforce_user_id | ✅ |
-| 17 | Chunk 溯源 + 增量更新 | 无 section_id 标记, 无法追溯到 chunk | 无 | 94 chunks×41 sections 标记, Reflection 溯源检查 | ✅ |
+| 17 | Chunk 溯源 + 增量更新 | 无 section_id 标记 | 无 | 94 chunks×41 sections 标记, Reflection 溯源检查 | ✅ |
+| 18 | MCP 健康监控 | 子进程崩溃无法恢复 | 无 | 30s 心跳 ping + 自动重启+重建图 | ✅ |
+| 19 | 语料热更新 | 改文件需重启 | 手动重索引 | mtime 检测→hash diff→增量重索引 | ✅ |
 
 ---
 
