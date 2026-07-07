@@ -129,15 +129,33 @@ def eval_context_recall(retrieved_docs: list[str], ground_truth_keywords: list[s
 
 
 # ============================================================
-#  测试数据
+#  测试数据 (从 100 条 v2 数据集中分层抽样 50 条)
 # ============================================================
-SAMPLE_QUERIES = [
-    {"q": "糖尿病人的饮食禁忌有哪些？", "gt_kw": ["糙米饭", "低GI", "碳水", "血糖"]},
-    {"q": "痛风患者应该避免什么食物？", "gt_kw": ["嘌呤", "海鲜", "内脏", "红肉"]},
-    {"q": "鸡胸肉每100g的蛋白质含量是多少？", "gt_kw": ["31", "蛋白质", "鸡胸肉"]},
-    {"q": "尿酸高了吃什么不好？", "gt_kw": ["嘌呤", "痛风", "尿酸"]},
-    {"q": "太胖了想减肥，每天应该吃多少热量？", "gt_kw": ["热量", "肥胖", "减重", "缺口"]},
-]
+def _load_ragas_queries(n=15):
+    ds_path = os.path.join(BASE_DIR, "data", "eval_rag_v2.json")
+    if not os.path.isfile(ds_path):
+        return None
+    with open(ds_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    import numpy as np
+    np.random.seed(42)
+    # 按类别分层抽样
+    cats = {}
+    for q in data["queries"]:
+        cats.setdefault(q["cat"], []).append(q)
+    selected = []
+    per_cat = max(2, n // len(cats))
+    for cat, qs in cats.items():
+        chosen = np.random.choice(len(qs), min(per_cat, len(qs)), replace=False)
+        for i in chosen:
+            q = qs[i]
+            selected.append({"q": q["q"], "gt_kw": q["keywords"]})
+    np.random.shuffle(selected)
+    return selected[:n]
+
+SAMPLE_QUERIES = _load_ragas_queries(24)
+if SAMPLE_QUERIES is None:
+    SAMPLE_QUERIES = [{"q": "糖尿病人的饮食禁忌有哪些？", "gt_kw": ["糙米饭", "低GI", "碳水", "血糖"]}]
 
 
 # ============================================================

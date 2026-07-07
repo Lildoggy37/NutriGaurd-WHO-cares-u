@@ -1,47 +1,180 @@
 {
-  "timestamp": "2026-06-09 23:13:47",
-  "queries": 5,
+  "timestamp": "2026-07-07 18:13:24",
+  "queries": 24,
   "metrics": {
-    "avg_faithfulness": 1.0,
-    "avg_answer_relevancy": 0.66,
-    "avg_context_precision": 0.667,
-    "avg_context_recall": 0.733
+    "avg_faithfulness": 0.854,
+    "avg_answer_relevancy": 0.511,
+    "avg_context_precision": 0.458,
+    "avg_context_recall": 0.654
   },
   "details": [
     {
-      "query": "糖尿病人的饮食禁忌有哪些？",
+      "query": "豆浆和牛奶早餐喝哪个更有营养？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.433,
+      "answer_relevancy": 0.367,
       "context_precision": 0.667,
-      "context_recall": 0.75
+      "context_recall": 0.6
     },
     {
-      "query": "痛风患者应该避免什么食物？",
+      "query": "猪瘦肉和鸡胸肉哪个蛋白质更高？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.567,
+      "answer_relevancy": 0.8,
+      "context_precision": 0.333,
+      "context_recall": 0.4
+    },
+    {
+      "query": "鸡胸肉的蛋白质含量是每100g多少克？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.5,
+      "context_precision": 0.333,
+      "context_recall": 0.5
+    },
+    {
+      "query": "甲亢患者的饮食注意事项",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.667,
+      "context_precision": 0.667,
+      "context_recall": 1.0
+    },
+    {
+      "query": "核桃的热量为什么这么高？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6,
+      "context_precision": 0.333,
+      "context_recall": 1.0
+    },
+    {
+      "query": "玉米是粗粮为什么GI也有55？",
+      "faithfulness": 0.667,
+      "answer_relevancy": 0.633,
+      "context_precision": 0.333,
+      "context_recall": 0.8
+    },
+    {
+      "query": "隔夜菜真的会致癌吗？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.933,
+      "context_precision": 0.0,
+      "context_recall": 0.6
+    },
+    {
+      "query": "吃什么可以提高免疫力？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.6,
+      "context_precision": 1.0,
+      "context_recall": 0.4
+    },
+    {
+      "query": "减肥期间可以吃零食吗？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.867,
+      "context_precision": 0.333,
+      "context_recall": 0.4
+    },
+    {
+      "query": "老年人牙不好怎么保证营养？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.667,
+      "context_precision": 0.667,
+      "context_recall": 0.8
+    },
+    {
+      "query": "吃糖太多对身体有哪些危害？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.467,
+      "context_precision": 0.333,
+      "context_recall": 0.8
+    },
+    {
+      "query": "糖尿病患者适合吃哪些主食？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.367,
       "context_precision": 1.0,
       "context_recall": 0.75
     },
     {
-      "query": "鸡胸肉每100g的蛋白质含量是多少？",
+      "query": "白米饭的GI值高吗？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.767,
+      "answer_relevancy": 0.633,
       "context_precision": 0.333,
-      "context_recall": 0.667
+      "context_recall": 1.0
     },
     {
-      "query": "尿酸高了吃什么不好？",
+      "query": "血亚高怎么吃东西",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.767,
+      "answer_relevancy": 0.4,
+      "context_precision": 0.333,
+      "context_recall": 0.75
+    },
+    {
+      "query": "嘴角老是开裂脱皮怎么回事？",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "query": "苹果的GI值适合糖尿病人吃吗？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.467,
+      "context_precision": 0.5,
+      "context_recall": 1.0
+    },
+    {
+      "query": "我今天吃了燕麦片和鸡蛋，营养均衡吗？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.3,
+      "context_precision": 0.667,
+      "context_recall": 1.0
+    },
+    {
+      "query": "唐尿病的饮十禁忌有哪些？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.867,
+      "context_precision": 0.0,
+      "context_recall": 0.5
+    },
+    {
+      "query": "老觉得累没精神是不是缺啥？",
+      "faithfulness": 0.833,
+      "answer_relevancy": 0.467,
+      "context_precision": 0.667,
+      "context_recall": 1.0
+    },
+    {
+      "query": "肝硬化腹水饮食控制",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "query": "老粘人肌肉流失吃啥子好？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.433,
       "context_precision": 1.0,
       "context_recall": 1.0
     },
     {
-      "query": "太胖了想减肥，每天应该吃多少热量？",
+      "query": "儿童挑食不爱吃蔬菜怎么办？",
       "faithfulness": 1.0,
-      "answer_relevancy": 0.767,
-      "context_precision": 0.333,
-      "context_recall": 0.5
+      "answer_relevancy": 0.6,
+      "context_precision": 0.5,
+      "context_recall": 0.8
+    },
+    {
+      "query": "常拉肚子是什么东西吃错了？",
+      "faithfulness": 0.0,
+      "answer_relevancy": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    {
+      "query": "怀孕初期孕吐严重吃什么能缓解？",
+      "faithfulness": 1.0,
+      "answer_relevancy": 0.633,
+      "context_precision": 1.0,
+      "context_recall": 0.6
     }
   ]
 }
