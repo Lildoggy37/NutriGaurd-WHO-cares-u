@@ -421,3 +421,68 @@ def load_long_term_memories(user_id: str) -> dict:
         return {r["key"]: r["value"] for r in rows}
     finally:
         conn.close()
+
+
+# ============================================================
+#  语料章节追踪表（增量更新 + chunk 溯源）
+# ============================================================
+
+def _ensure_corpus_table():
+    conn = get_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS corpus_sections (
+                section_id TEXT PRIMARY KEY,
+                chapter TEXT,
+                section TEXT,
+                content_hash TEXT NOT NULL,
+                chunk_count INTEGER DEFAULT 0,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_ensure_corpus_table()
+
+
+def upsert_corpus_section(section_id: str, chapter: str, section: str,
+                          content_hash: str, chunk_count: int):
+    """更新或插入语料章节 hash 记录"""
+    conn = get_connection()
+    now = __import__('datetime').datetime.now().isoformat()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO corpus_sections (section_id, chapter, section, content_hash, chunk_count, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (section_id, chapter, section, content_hash, chunk_count, now),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_corpus_section_hash(section_id: str) -> str | None:
+    """获取已存储的章节 hash，无记录返回 None"""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT content_hash FROM corpus_sections WHERE section_id=?", (section_id,)
+        ).fetchone()
+        return row["content_hash"] if row else None
+    finally:
+        conn.close()
+
+
+def get_all_corpus_sections() -> list[dict]:
+    """获取所有章节记录"""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM corpus_sections ORDER BY updated_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()

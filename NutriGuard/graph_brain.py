@@ -408,9 +408,36 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
                 except Exception:
                     pass
 
+            # --- chunk 溯源检查：回答中的关键数据是否能追溯到数据库 chunk ---
+            provenance_note = None
+            # 从检索证据中提取所有 section_id
+            source_ids = set()
+            for m in messages:
+                if isinstance(m, ToolMessage):
+                    content_str = str(m.content)
+                    for sid in re.findall(r'section_id[=:](\w+)', content_str):
+                        source_ids.add(sid)
+            # 从回答中尝试提取 section_id 引用——如果有引用但不在 source_ids 列表中→疑似编造
+            answer_refs = set(re.findall(r'section_id[=:](\w+)', answer_text))
+            fake_refs = answer_refs - source_ids
+            if fake_refs:
+                provenance_note = (
+                    f"[溯源警告] 回答引用了不在检索证据中的 section_id: {fake_refs}。"
+                    f"检索证据仅包含: {source_ids or '无'}"
+                )
+                print(f"[Reflection] {provenance_note}")
+            # 如果 source_ids 为空（本次未检索到内容），则跳过溯源检查
+            if not source_ids and not answer_refs:
+                pass  # 检索返回空，不认为是溯源问题
+
             if verdict.verdict == "PASS":
+                notes = []
                 if consistency_note:
-                    return {"messages": [SystemMessage(content=consistency_note, name="reflection")],
+                    notes.append(consistency_note)
+                if provenance_note:
+                    notes.append(provenance_note)
+                if notes:
+                    return {"messages": [SystemMessage(content=" | ".join(notes), name="reflection")],
                             "next_node": "supervisor"}
                 return {"next_node": "supervisor"}
 

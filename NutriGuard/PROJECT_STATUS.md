@@ -15,7 +15,7 @@
 | MCP 工具 | 8 个（4 RAG + 4 Action） |
 | LangGraph 节点 | 7 个 |
 | Pytest 单元测试 | 14 个（10 纯单元 + 4 集成） |
-| 评测数据 | RAG 100 条（8 类别）+ AI 标注 Recall + RAGAS 5 条 |
+| 评测数据 | RAG 100 条（8 类别）+ AI 标注 Recall + RAGAS 24 条（分层抽样） |
 | Docker 容器 | 4 个（API + Redis + Prometheus + Grafana） |
 
 ---
@@ -28,7 +28,7 @@
 | Embedding | BGE-large-zh-v1.5 (本地) | 中文 MTEB 最高/1024 维/本地免费 | ✓ RAG 评测 | 100 条，Recall@3=88% | 不支持 Sparse，需额外 BM25 |
 | Reranker | BGE-Reranker-v2-m3 (本地) | CrossEncoder 精度 > Bi-Encoder | ✓ RAG 评测 | Context Precision 0.667 | 单线程慢(~12s/query)，考虑 ONNX 量化 |
 | Sparse Retrieval | BM25 (Qdrant/bm25) | 精确关键词匹配，和 Dense 互补 | ✓ RAG 评测 | Hybrid > Dense-only (Recall +5%) | 下载需 HF 网络，离线用补丁跳过 |
-| Vector DB | Qdrant (内存模式) | Hybrid Search 原生支持/零配置 | ✓ RAG 评测 | 80+ chunk 索引 ~800KB | 内存模式重启丢失，待切磁盘模式 |
+| Vector DB | Qdrant (磁盘模式) | Hybrid Search 原生支持/零配置 | ✓ RAG 评测 | 80+ chunk 索引 ~800KB, 路径 `data/qdrant_storage` | ✅ 已持久化 |
 | 语义缓存 | Redis Stack | KNN 向量搜索/24h TTL | △ 功能验证 | 命中 <50ms, 加速 75x | 标准 Redis 不支持，需自动检测降级 |
 | 限流 | Redis 滑动窗口 | Sorted Set 原子操作 | ✓ 功能验证 | 60req/60s/IP | 仅 IP 维度，无用户级限流 |
 | 健康画像 | SQLite | 零配置/字段级增量更新 | ✓ func test | 6 字段，41 种食物关联 | 未传字段存 NULL→已修了 or 默认值 bug |
@@ -36,9 +36,9 @@
 | 工作记忆 | Redis working_memory | 1h TTL/重启恢复 | △ 功能验证 | 最近 20 条消息 | 需 Redis 在线，离线退 MemorySaver |
 | 多 Agent 框架 | LangGraph Supervisor | 显式路由/状态管理/checkpointer | ✓ 14 个 pytest | 图拓扑(4)+路由(4)+AgentState(3)+压缩(3) | Qwen role 交替校验需大量兼容代码 |
 | 工具协议 | MCP (stdio) | 自动工具发现/零网络延迟 | ✓ func test | 8 个工具按职能隔离 | 子进程崩溃无自动重启 |
-| 合规审查 | Reflection 节点 | 幻觉/安全/完整性三重审查 | ✓ RAGAS Faithfulness | Faithfulness 1.0 | 不审查 Agent vs SQLite 一致性 |
+| 合规审查 | Reflection 节点 | 幻觉/安全/完整性+用户数据一致性校验 | ✓ RAGAS Faithfulness 0.854 | 24 条分层抽样 | ✅ 已加身高/体重/年龄交叉校验 |
 | 意图预处理 | Preprocess 节点 | 纠错/同义词展开/指代消解 | ✓ prompt 检查 | 9/9 规则完整 | ≤10 字跳过，长查询改写质量依赖 LLM |
-| Chunking | 512ch+128ov+元数据注入 | 固定大小/防截断/章节感知 | ✓ RAGAS | Precision 0.40→0.667 (+67%) | 语料继续扩充后需 parent-child 策略 |
+| Chunking | 512ch+128ov+元数据+section_id+SHA256 | 固定大小/防截断/章节感知/溯源/增量更新 | ✓ RAGAS | 94 chunks, 41 sections, Precision 0.40→0.667 (+67%) | ✅ section_id+hash 已完成 |
 | Token 追踪 | llm_token_total Counter | 输入/输出按节点统计 | ✓ func test | 6 个节点埋点 | 工具内 LLM 调用未纳入 |
 | Harness | NodeHarness+ToolHarness+LLMRateLimiter | 重试/超时/熔断/并发控制 | ✓ 14 个 pytest 通过 | retry×2, timeout10-60s, QPS10+并发5 | 429 限流未特殊处理退避 |
 | Prompt 注入防御 | Preprocess 正则 + System Prompt 加固 | 10 个注入模式 → FINISH, 3 个 prompt 加固 | ✓ 14 个 pytest 通过 | 注入检测在路由前拦截 | 对抗性 prompt 未充分测试 |
@@ -73,14 +73,16 @@
 
 ### 3.2 RAGAS 生成质量评测
 
-| 指标 | 值 | 如何计算的 |
-|------|-----|-----------|
-| **Faithfulness** | **1.000** | LLM 逐声明检验→是否基于检索证据 |
-| **Answer Relevancy** | **0.660** | 反向问题生成→语义相似度评分 |
-| **Context Precision** | **0.667** | LLM 判断每个 chunk 是否相关 |
-| **Context Recall** | **0.733** | 关键词覆盖率（简化版） |
+**从 100 条 v2 数据集中按 8 类别分层抽样 24 条**，纯 LLM 实现不依赖 ragas 库。
 
-**方法**：LLM-as-judge（qwen-plus 裁判），5 条查询，纯 LLM 实现不依赖 ragas 库。Faithfulness 经历过一轮修复——初版 prompt 导致 5/10 条 JSON 解析失败得 0 分，改 prompt + 加 retry 后稳定为 1.000。RAGAS 当前没有 5-fold CV，因为每条查询需要 3-4 次 LLM 裁判调用。
+| 指标 | 24 条(新) | 5 条(旧) | 变化 |
+|------|----------|---------|------|
+| **Faithfulness** | **0.854** | 1.000 | -0.146 (更真实, 不再"太假") |
+| **Answer Relevancy** | **0.511** | 0.660 | -0.149 |
+| **Context Precision** | **0.458** | 0.667 | -0.209 |
+| **Context Recall** | **0.654** | 0.733 | -0.079 |
+
+**方法**：LLM-as-judge（qwen-plus 裁判），每条查询 3-4 次 LLM 裁判调用（Faithfulness/Relevancy/Precision/Recall）。Faithfulness 经历过一轮修复——初版 prompt 导致 JSON 解析失败，改 prompt + 加 retry 后稳定。24 条分层抽样比 5 条手选更真实——暴露了语料新扩充疾病的覆盖差距。
 
 ### 3.3 其他评测
 
@@ -89,7 +91,11 @@
 | Supervisor 路由 | 20 条，规则下限 + CoT LLM 实测 | 规则 85%，CoT 90% |
 | 食物解析器 | 15 条×29 项，直接调用 _parse_food_items | 名称 100%，克数 96.6%，误差 3.4% |
 | 记忆压缩 | 6 场景（糖尿病/痛风/超长多轮/中断恢复/单轮/多疾病混合） | 留存率 100%，FINISH 信号完整保留 |
+| 语义缓存阈值 | BGE 实测: 同病 0.91/异病 0.49 → 0.85 合理 | 200 对查询实测 |
 | 预处理 Prompt | 正则提取 graph_brain.py 源码 | 9/9 规则完整度 100% |
+| 性能基准 | 20 条 × 5 类型 query | avg 180t, ￥0.0002, 2s/query |
+| Prompt 注入防御 | Preprocess 10 个注入模式正则拦截 | ✓ 注入→FINISH |
+| JWT 认证 | create/verify/enforce, 3 工具强制覆盖 | ✓ user_id 不再自报家门 |
 
 ---
 
@@ -108,6 +114,12 @@
 | 9 | Qdrant 持久化 | 内存模式重启丢失索引 | 每次启动 re-index | 磁盘模式 `data/qdrant_storage` | ✅ |
 | 10 | Reflection 一致性校验 | 回答不检查 vs SQLite 一致性 | 无校验 | 身高/体重/年龄交叉校验 | ✅ |
 | 11 | Token 追踪 + LLM 并发控制 | 高并发保护 | 无 | 6 节点埋点 + QPS10/并发5 | — |
+| 12 | 性能基准 20 条 | 无全链路数据 | — | avg 180t/query, ￥0.0002, 2s | — |
+| 13 | 语义缓存阈值验证 | 0.85 拍脑袋 | — | BGE 实测: 同病 0.91/异病 0.49, 0.85 合理 | ✅ |
+| 14 | RAGAS 5→24 条 | Faithfulness=1.0 太假 | 1.000 (5Q) | 0.854 (24Q) | ✅ 更真实 |
+| 15 | Prompt 注入防御 | 无防护 | 无 | Preprocess 正则拦截 + 3 prompt 加固 | ✅ |
+| 16 | JWT 认证授权 | user_id 自报家门 | 无 | auth.py + api/mcp 接线 + enforce_user_id | ✅ |
+| 17 | Chunk 溯源 + 增量更新 | 无 section_id 标记, 无法追溯到 chunk | 无 | 94 chunks×41 sections 标记, Reflection 溯源检查 | ✅ |
 
 ---
 
@@ -118,9 +130,8 @@
 | P1 | 语料更新无闭环 | 65K 静态文件，手动编辑 | Hash 增量更新 + admin API |
 | P1 | MCP 子进程无健康监控 | 崩溃后无法自动恢复 | 加 health monitor + 自动重启 |
 | P1 | 前端无 E2E 测试 | 手动测试 | Cypress/Playwright |
-| P2 | RAGAS 评测仅 5 条 | 样本量不足 | 扩充到 20+ 条 + CV |
-| P2 | 语义缓存阈值 0.85 是经验值 | 无数据驱动的调优 | 跑阈值调优脚本 |
 | P2 | 无隐私加密/SQLite 明文 | 开发阶段 | AES + PII 过滤 + GDPR API |
+| P2 | JWT_SECRET 默认值 | 开发阶段不安全 | 环境变量注入 |
 | P3 | 无跨用户 A/B 测试 | — | 多版本 graph 并行对比 |
 
 ---
