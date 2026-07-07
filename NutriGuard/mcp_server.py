@@ -140,10 +140,69 @@ async def _init_rag_engine_async():
         print(f"  [RAG-init] Reranker 加载完成 ({time.time()-t5:.1f}s)", file=sys.stderr)
 
         _rag_ready = True
-        rag_engine_ready.set(1) # 监测
+        rag_engine_ready.set(1)
+        global _corpus_mtime
+        _corpus_mtime = os.path.getmtime(CORPUS_PATH)  # 记录初始修改时间
         print(f"[RAG-init] === 全量就绪，总耗时 {time.time()-t0:.1f}s ===", file=sys.stderr)
     finally:
         _rag_init_event.set()
+
+
+# ============================
+#   语料热更新：检测 mock_corpus.md 变化 → 增量重索引
+# ============================
+_corpus_mtime: float = 0.0  # 上次索引时的文件修改时间
+
+
+async def _reload_corpus_if_changed():
+    """检测 mock_corpus.md 是否变化，有变化则增量重索引"""
+    global _corpus_mtime, _retriever
+
+    if not os.path.isfile(CORPUS_PATH):
+        return
+
+    current_mtime = os.path.getmtime(CORPUS_PATH)
+    if current_mtime == _corpus_mtime:
+        return  # 无变化
+
+    if _corpus_mtime == 0.0:
+        _corpus_mtime = current_mtime  # 首次运行，记录时间
+        return
+
+    print(f"[RAG-reload] 检测到 mock_corpus.md 变化，增量重索引...", file=sys.stderr)
+    t0 = time.time()
+
+    try:
+        with open(CORPUS_PATH, "r", encoding="utf-8") as f:
+            new_text = f.read()
+
+        from db import get_corpus_section_hash, upsert_corpus_section
+        new_docs, new_hashes = chunk_with_section_ids(new_text)
+
+        updated = 0
+        for sid, info in new_hashes.items():
+            old_hash = get_corpus_section_hash(sid)
+            if old_hash == info["hash"]:
+                continue  # 此 section 无变化
+
+            # 删旧 chunk + 写新 chunk
+            try:
+                _vectorstore.delete(filter={"must": [{"key": "section_id", "match": {"value": sid}}]})
+            except Exception:
+                pass
+
+            section_docs = [d for d in new_docs if d.metadata.get("section_id") == sid]
+            if section_docs:
+                _vectorstore.add_documents(section_docs)
+
+            upsert_corpus_section(sid, info["chapter"], info["section"], info["hash"], info["chunk_count"])
+            updated += 1
+
+        _corpus_mtime = current_mtime
+        _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
+        print(f"[RAG-reload] 完成: {updated}/{len(new_hashes)} 个 section 已更新 ({time.time()-t0:.1f}s)", file=sys.stderr)
+    except Exception as e:
+        print(f"[RAG-reload] 增量更新失败: {e}, 保留旧索引", file=sys.stderr)
 
 
 # 初始化 SQLite（轻量，无阻塞）
@@ -157,6 +216,7 @@ async def perform_rag_search(query: str, top_k: int = 3) -> str:
     首次调用会触发 RAG 引擎的异步延迟初始化。
     """
     t0 = time.time()
+    await _reload_corpus_if_changed()  # 检测语料文件变化 → 增量重索引
     print(f"[RAG-search] 收到查询: {query[:60]}...", file=sys.stderr)
     rag_search_total.labels(tool_name="perform_rag_search").inc() # 监测
 
