@@ -97,7 +97,7 @@ async def lifespan(app:FastAPI):
             app.state.memory = MemoryHarness(redis_client)
             print("[生命周期] Multi-Agent 神经网络编译完成，服务就绪。")
 
-            # 5 预热 RAG 引擎（触发懒加载，避免首次用户请求等待 30s）
+            # 5 预热 RAG 引擎
             warmup_tool = next(
                 (t for t in rag_tools if t.name == "search_diet_guidelines"), None
             )
@@ -109,7 +109,49 @@ async def lifespan(app:FastAPI):
                 except Exception as e:
                     print(f"[生命周期] 预热异常（不影响启动）: {e}")
 
+            # 6 MCP 子进程健康监控 + 自动恢复
+            async def _mcp_health_monitor():
+                nonlocal session, all_tools, rag_tools, action_tools
+                while True:
+                    await asyncio.sleep(30)
+                    try:
+                        # 尝试通过 session 调用 tools/list 检测死活
+                        await session.send_ping()
+                    except Exception:
+                        print("[生命周期] MCP 子进程失联，尝试重启...", flush=True)
+                        try:
+                            # 重新拉起子进程
+                            new_transport = await stack.enter_async_context(
+                                stdio_client(server_params)
+                            )
+                            new_read, new_write = new_transport
+                            new_session = await stack.enter_async_context(
+                                ClientSession(new_read, new_write)
+                            )
+                            await new_session.initialize()
+                            session = new_session
+
+                            # 重新加载工具
+                            all_tools = await load_mcp_tools(session)
+                            rag_tools = [t for t in all_tools if t.name in rag_tool_names]
+                            action_tools = [t for t in all_tools if t.name in action_tool_names]
+
+                            # 重建图
+                            app.state.graph = build_multi_agent_graph(rag_tools, action_tools)
+                            print("[生命周期] MCP 子进程已恢复，图已重建", flush=True)
+                        except Exception as e2:
+                            print(f"[生命周期] MCP 恢复失败: {e2}，下次继续尝试", flush=True)
+
+            health_task = asyncio.create_task(_mcp_health_monitor())
+
             yield
+
+            # 清理
+            health_task.cancel()
+            try:
+                await health_task
+            except asyncio.CancelledError:
+                pass
 
         except Exception as e:
             import traceback
