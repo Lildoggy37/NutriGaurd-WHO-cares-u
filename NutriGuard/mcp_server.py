@@ -768,6 +768,160 @@ async def generate_shopping_list(ingredients: str) -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+@tool_harness(name="generate_recipe", timeout_seconds=30,
+              fallback_msg="食谱生成暂时不可用，请稍后重试")
+async def generate_recipe(ingredients: str, user_id: str) -> str:
+    """
+    根据可用食材和用户健康画像生成个性化食谱生成指令。
+    冰箱场景：vision_expert 识别食材 → 本工具聚合数据 → action_expert 的 LLM 合成最终食谱。
+
+    本工具负责数据层（查库 + RAG + 热量），LLM 负责创意层（设计菜品和烹饪方法）。
+
+    Args:
+        ingredients: 逗号分隔的食材，如 "鸡胸肉,西兰花,胡萝卜,鸡蛋"
+        user_id: 用于查询健康画像（疾病禁忌、热量目标）
+    Returns:
+        自然语言食谱生成指令，action_expert 的 LLM 将根据此指令生成最终食谱文本
+    """
+    user_id = enforce_user_id(user_id)
+    print(f" [MCP 食谱] 聚合食谱数据: ingredients={ingredients}, user={user_id}", file=sys.stderr)
+
+    # 1. 解析食材列表
+    parts = [p.strip() for p in ingredients.replace("，", ",").split(",") if p.strip()]
+    if not parts:
+        return "【食谱生成失败】请提供至少一种食材。"
+    parts = [p.lstrip("0123456789克公斤斤个只根块片粒颗勺碗盘杯份gml ") for p in parts]
+
+    # 2. 查 SQLite 获取每种食材的营养数据
+    food_data: list[dict] = []
+    food_lines: list[str] = []
+    unknown: list[str] = []
+    for name in parts:
+        food = lookup_food(name)
+        if food:
+            food_data.append({
+                "name": food["name"],
+                "category": food["category"],
+                "calories_per_100g": food["calories_per_100g"],
+                "protein_per_100g": food["protein_per_100g"],
+                "fat_per_100g": food["fat_per_100g"],
+                "carbs_per_100g": food["carbs_per_100g"],
+                "gi": food["gi"],
+            })
+            gi_str = f"GI={food['gi']}" if food["gi"] else "GI未知"
+            food_lines.append(
+                f"  - {food['name']}（{food['category']}）: "
+                f"{food['calories_per_100g']}kcal/100g, "
+                f"蛋白{food['protein_per_100g']}g, 脂肪{food['fat_per_100g']}g, "
+                f"碳水{food['carbs_per_100g']}g, {gi_str}"
+            )
+        else:
+            unknown.append(name)
+
+    # 3. 查询用户健康画像
+    profile = get_health_profile(user_id)
+    conditions = profile.get("conditions", "") if profile else ""
+    gender = profile.get("gender", "未设置") if profile else "未设置"
+    age = profile.get("age", "未设置") if profile else "未设置"
+
+    # 4. 计算热量目标
+    target = calculate_daily_target(user_id)
+    remaining_cal = round(target.adjusted_calories - target.consumed_calories, 1)
+
+    # 5. RAG 禁忌查询
+    taboo_text = ""
+    if conditions:
+        cond_list = [c.strip() for c in conditions.replace("，", ",").split(",") if c.strip()]
+        for cond in cond_list:
+            try:
+                result = await perform_rag_search(f"{cond} 饮食禁忌", top_k=2)
+                taboo_text += f"\n{result[:600]}"
+            except Exception as e:
+                print(f"[MCP 食谱] 禁忌查询失败({cond}): {e}", file=sys.stderr)
+
+    # 6. RAG 食谱指南
+    guide_text = ""
+    try:
+        main_ingredients = " ".join(f["name"] for f in food_data) if food_data else ""
+        guide_query = f"晚餐 食谱 {main_ingredients}" if main_ingredients else "健康晚餐 食谱"
+        guide_text = await perform_rag_search(guide_query, top_k=2)
+    except Exception as e:
+        print(f"[MCP 食谱] 食谱指南查询失败: {e}", file=sys.stderr)
+
+    # 7. 禁忌过滤
+    max_gi = 55
+    safe_items: list[str] = []
+    warning_items: list[str] = []
+    for f in food_data:
+        gi = f["gi"] or 0
+        if gi > max_gi:
+            warning_items.append(f"{f['name']}（GI={gi}，建议每餐不超过100g）")
+        else:
+            safe_items.append(f["name"])
+
+    # 8. 组装自然语言食谱生成指令（action_expert 的 LLM 将据此生成最终食谱）
+    lines = [
+        "请根据以下信息，为用户生成一份详细的个性化食谱建议。",
+        "",
+        "【可用的食材与营养数据】",
+    ]
+    if food_lines:
+        lines.extend(food_lines)
+    else:
+        lines.append("  （未识别到已知食材）")
+    if unknown:
+        lines.append(f"  未知食材（需LLM自行判断）: {', '.join(unknown)}")
+
+    lines += [
+        "",
+        "【用户健康画像】",
+    ]
+    if conditions:
+        lines.append(f"  疾病/健康状况: {conditions}")
+    lines.append(f"  性别: {gender}, 年龄: {age}")
+    lines.append(f"  今日热量目标: {target.adjusted_calories}kcal")
+    lines.append(f"  已摄入: {target.consumed_calories}kcal")
+    lines.append(f"  剩余可用: {remaining_cal}kcal")
+
+    if safe_items:
+        lines.append(f"  安全食材（低GI≤{max_gi}）: {', '.join(safe_items)}")
+    if warning_items:
+        lines.append(f"  需控制分量的食材: {'; '.join(warning_items)}")
+
+    if taboo_text:
+        lines += [
+            "",
+            "【疾病饮食禁忌参考（来自知识库）】",
+            taboo_text[:800],
+        ]
+
+    if guide_text:
+        lines += [
+            "",
+            "【饮食指南参考（来自知识库）】",
+            guide_text[:600],
+        ]
+
+    lines += [
+        "",
+        "【生成要求】",
+        "1. 基于以上食材，为用户设计 2-3 个具体菜品（含大致烹饪方法）",
+        "2. 说明每道菜的热量估算和推荐份量",
+        "3. 确保总热量不超过用户剩余可用热量",
+        "4. 严格遵守疾病禁忌——禁忌清单中的食材不要推荐",
+        "5. 对高GI或需控制分量的食材给出明确标注",
+        "6. 语气友好专业，用中文输出",
+        "7. 如食材不足以组成完整一餐，诚实告知并建议补充食材",
+        "8. 最后询问用户是否需要根据食谱生成采购清单",
+    ]
+
+    result = "\n".join(lines)
+    print(f"[MCP 食谱] 生成指令完成: {len(food_data)}食材, {len(warning_items)}警告, "
+          f"剩余{remaining_cal}kcal, {len(result)}字符", file=sys.stderr)
+    return result
+
+
 if __name__ == "__main__":
     print("🚀 [NutriGuard MCP] 健康膳食微服务已启动...", file=sys.stderr)
     mcp.run()

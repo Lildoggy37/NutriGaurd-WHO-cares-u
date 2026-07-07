@@ -64,7 +64,7 @@ class TestGraphTopology:
         node_names = set(graph.get_graph().nodes.keys())
         expected = {
             "preprocess", "supervisor", "rag_expert", "rag_reflection",
-            "action_expert", "slot_filler", "memory_compressor",
+            "action_expert", "slot_filler", "vision_expert", "memory_compressor",
             "__start__", "__end__",
         }
         missing = expected - node_names

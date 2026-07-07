@@ -75,7 +75,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     #    3. Supervisor
     # =====================================
     class RouteDecision(BaseModel):
-        next_node: Literal["rag_expert", "action_expert", "slot_filler", "FINISH"] = Field(
+        next_node: Literal["rag_expert", "action_expert", "slot_filler", "vision_expert", "FINISH"] = Field(
         alias="route"   # 同时接受 "route" 字段名
         )
         reason: str = ""
@@ -95,11 +95,12 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
 
     【分析步骤】请依次思考：
     1. 用户最后一句话的核心诉求是什么？（一句话概括）
-    2. 这属于哪类意图？知识查询(rag) / 操作执行(action) / 信息不全(slot) / 对话结束(FINISH)？
+    2. 这属于哪类意图？知识查询(rag) / 操作执行(action) / 信息不全(slot) / 图像分析(vision) / 对话结束(FINISH)？
     3. 如果选 FINISH，确认理由是什么？如果选其他节点，用户是否已提供足够信息？
     4. 最终路由决定：
 
     【路由规则】
+    - 用户上传了图片/照片 → vision_expert
     - 用户询问疾病禁忌、指南知识、营养成分 → rag_expert
     - 用户想记录饮食、计算热量、更新健康信息、生成采购清单 → action_expert
     - 用户的话信息不全 → slot_filler
@@ -114,7 +115,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     （分析文字...）
     {"route": "rag_expert", "reason": "理由"}
 
-    route 只能是四个值之一：rag_expert / action_expert / slot_filler / FINISH"""
+    route 只能是五个值之一：rag_expert / action_expert / slot_filler / vision_expert / FINISH"""
 
     @node_harness(name="supervisor", retries=1, timeout_seconds=30, fallback={"next_node": "FINISH"})
     async def supervisor_node(state: AgentState):
@@ -126,6 +127,19 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
         if last_msg and getattr(last_msg, "name", "") == "memory_summary":
             print("[Supervisor] 检测到压缩摘要消息，本轮结束")
             return {"next_node": "FINISH"}
+
+        # 图片检测：最后一条 HumanMessage 包含多模态 content（list）→ 视觉分析
+        for m in reversed(messages):
+            if isinstance(m, HumanMessage) and isinstance(m.content, list):
+                # 检查是否包含 image_url 块
+                has_image = any(
+                    isinstance(block, dict) and block.get("type") == "image_url"
+                    for block in m.content
+                )
+                if has_image:
+                    print("[Supervisor] 检测到图片消息，路由到 vision_expert")
+                    return {"next_node": "vision_expert"}
+                break  # 只检查最后一条 HumanMessage
 
         # 终止信号：最后一条是完整的 AI 回答（无 tool_calls）→ 结束
         last_ai = None
@@ -202,6 +216,75 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             print(f"🧨 [Action 节点异常] {e}")
             error_msg = SystemMessage(content="【系统提示】抱歉，膳食日志系统暂时不可用，记录失败。", name="action_expert")
             return {"messages": [error_msg], "next_node": "supervisor"}
+
+    VISION_ANALYSIS_PROMPT = """你是营养视觉分析助手。请分析这张食物照片。
+
+【分析规则】
+- 如果是餐食照片（一盘菜/一桌饭）：识别所有食物名称，估算分量（克），标注置信度(high/medium/low)
+- 如果是冰箱/储物照片：列出所有可见食材（通用名称），标注新鲜度提示
+
+【输出格式】严格输出一行 JSON，不要 markdown 代码块：
+{"scene":"meal","items":[{"name":"红烧肉","amount_g":200,"confidence":"medium"}],"uncertain_items":["红烧肉分量在150-250g之间"]}
+或
+{"scene":"fridge","ingredients":["鸡胸肉","西兰花","胡萝卜"],"freshness_notes":"胡萝卜表皮略干"}
+
+如果图片不包含食物，输出：{"scene":"unknown","error":"未检测到食物"}"""
+
+    @node_harness(name="vision_expert", retries=1, timeout_seconds=60, fallback={"next_node": "FINISH"})
+    async def vision_expert_node(state: AgentState):
+        print(" [Vision Expert] 正在分析图片...")
+        try:
+            vision_llm = ChatOpenAI(
+                model="qwen-vl-plus",
+                temperature=0.0,
+                api_key=os.getenv("DASHSCOPE_API_KEY"),
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+            )
+
+            # 找到最后一条含图片的 HumanMessage
+            target_msg = None
+            for m in reversed(state["messages"]):
+                if isinstance(m, HumanMessage) and isinstance(m.content, list):
+                    target_msg = m
+                    break
+
+            if target_msg is None:
+                print("[Vision Expert] 未找到图片消息，回退")
+                return {"next_node": "FINISH"}
+
+            vision_messages = [
+                SystemMessage(content=VISION_ANALYSIS_PROMPT),
+                target_msg,
+            ]
+
+            async with llm_rate_limiter:
+                response = await vision_llm.ainvoke(vision_messages)
+            record_tokens("vision_expert", response.response_metadata.get("token_usage", {}))
+
+            raw = str(response.content) if response.content else ""
+            if not raw.strip():
+                raise ValueError("Vision LLM returned empty content")
+
+            json_str = _extract_json(raw)
+            parsed = json.loads(json_str)
+            print(f"[Vision Expert] 场景={parsed.get('scene')}, 物品数={len(parsed.get('items', parsed.get('ingredients', [])))}")
+
+            # 将分析结果注入消息流，供后续节点（slot_filler/action_expert）使用
+            result_msg = AIMessage(
+                content=f"[视觉分析结果] {json.dumps(parsed, ensure_ascii=False)}",
+                name="vision_expert",
+            )
+            return {"messages": [result_msg], "next_node": "supervisor"}
+
+        except Exception as e:
+            print(f"[Vision Expert 异常] {e}")
+            import traceback
+            traceback.print_exc()
+            error_msg = SystemMessage(
+                content="【系统提示】抱歉，图片分析暂时不可用，请用文字描述您吃了什么或冰箱里有什么。",
+                name="vision_expert",
+            )
+            return {"messages": [error_msg], "next_node": "FINISH"}
 
     SLOT_FILLER_PROMPT = """你是一个细心的健康管家。用户刚才说的话信息不完整，你需要追问以补全关键信息。
 
@@ -616,6 +699,7 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
     workflow.add_node("rag_reflection", rag_reflection_node)
     workflow.add_node("action_expert", action_expert_node)
     workflow.add_node("slot_filler", slot_filler_node)
+    workflow.add_node("vision_expert", vision_expert_node)
     workflow.add_node("memory_compressor", memory_compressor_node)
 
     # START → preprocess → supervisor
@@ -630,9 +714,13 @@ def build_multi_agent_graph(rag_tools:list, action_tools:list, checkpointer=None
             "rag_expert": "rag_expert",
             "action_expert": "action_expert",
             "slot_filler": "slot_filler",
+            "vision_expert": "vision_expert",
             "FINISH": END,
         },
     )
+
+    # Vision 路径: vision_expert → supervisor（分析完回到 supervisor 决定下一步）
+    workflow.add_edge("vision_expert", "supervisor")
 
     # RAG 路径: rag_expert → rag_reflection → END（不绕回 supervisor 避免膨胀→压缩→死循环）
     workflow.add_edge("rag_expert", "rag_reflection")

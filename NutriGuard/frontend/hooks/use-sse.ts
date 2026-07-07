@@ -6,6 +6,7 @@ export interface SSEMessage {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  imageBase64?: string;
   status?: string;
   reflection?: { verdict: string; reason: string } | null;
 }
@@ -14,7 +15,7 @@ interface UseSSEChatReturn {
   messages: SSEMessage[];
   currentStatus: string;
   isStreaming: boolean;
-  sendMessage: (query: string) => Promise<void>;
+  sendMessage: (query: string, imageBase64?: string) => Promise<void>;
   clearMessages: () => void;
 }
 
@@ -30,13 +31,14 @@ export function useSSEChat(sessionId = "default_user"): UseSSEChatReturn {
   const abortRef = useRef<AbortController | null>(null);
 
   const sendMessage = useCallback(
-    async (query: string) => {
-      if (!query.trim() || isStreaming) return;
+    async (query: string, imageBase64?: string) => {
+      if ((!query.trim() && !imageBase64) || isStreaming) return;
 
       const userMsg: SSEMessage = {
         id: crypto.randomUUID(),
         role: "user",
-        content: query,
+        content: query || (imageBase64 ? "[图片]" : ""),
+        imageBase64,
       };
       setMessages((prev) => [...prev, userMsg]);
       setIsStreaming(true);
@@ -57,7 +59,11 @@ export function useSSEChat(sessionId = "default_user"): UseSSEChatReturn {
         const response = await fetch(`${BACKEND_URL}/api/chat/stream`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ session_id: sessionId, query }),
+          body: JSON.stringify({
+            session_id: sessionId,
+            query: query || "请分析这张图片",
+            image_base64: imageBase64 || undefined,
+          }),
           signal: controller.signal,
         });
 

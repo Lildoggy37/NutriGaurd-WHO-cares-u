@@ -85,7 +85,7 @@ async def lifespan(app:FastAPI):
             rag_tools = [t for t in all_tools if t.name in rag_tool_names]
             action_tool_names = {
                 "log_user_meal", "calculate_daily_calories",
-                "generate_shopping_list", "update_health_profile",
+                "generate_shopping_list", "generate_recipe", "update_health_profile",
             }
             action_tools = [t for t in all_tools if t.name in action_tool_names]
 
@@ -283,6 +283,7 @@ async def health_check():
 class ChatRequest(BaseModel):
     session_id: str = "default_user_001"
     query: str
+    image_base64: str | None = None
 
 @app.post("/api/chat/stream", dependencies=[Depends(sliding_window_rate_limiter)])
 async def chat_stream_endpoint(request: ChatRequest):
@@ -298,8 +299,19 @@ async def chat_stream_endpoint(request: ChatRequest):
     AuthContext.set_current_user(auth_user_id)
 
     async def event_generator() -> AsyncGenerator[str, None]:
+        # 构造 HumanMessage：支持纯文本和多模态（文本+图片）
+        if request.image_base64:
+            msg_content = [
+                {"type": "text", "text": request.query or "请分析这张图片"},
+                {"type": "image_url", "image_url": {
+                    "url": f"data:image/jpeg;base64,{request.image_base64}"
+                }},
+            ]
+        else:
+            msg_content = request.query
+
         initial_state = {
-            "messages": [HumanMessage(content=request.query)],
+            "messages": [HumanMessage(content=msg_content)],
             "user_profile": {"用户标识": auth_user_id},
             "next_node": "",
         }
@@ -328,7 +340,7 @@ async def chat_stream_endpoint(request: ChatRequest):
                     node_name = event.get("name", "")
                     STATUS_NODES = {
                         "preprocess", "supervisor", "rag_expert", "rag_reflection",
-                        "action_expert", "slot_filler", "memory_compressor",
+                        "action_expert", "slot_filler", "vision_expert", "memory_compressor",
                     }
                     if node_name in STATUS_NODES:
                         node_timers[node_name] = now

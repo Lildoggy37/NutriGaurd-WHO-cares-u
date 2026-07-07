@@ -8,12 +8,12 @@
 
 | 维度 | 数据 |
 |------|------|
-| Python 代码 | ~5,800 行（含测试） |
-| 前端 Next.js | ~450 行（chat-input/viewport/sidebar/components） |
+| Python 代码 | ~6,200 行（含测试） |
+| 前端 Next.js | ~550 行（chat-input/viewport/sidebar/components） |
 | RAG 语料 | **65K 字符**，9 章 51 节，80+ chunk |
 | 食物数据库 | 41 种，10 类（SQLite） |
-| MCP 工具 | 8 个（4 RAG + 4 Action） |
-| LangGraph 节点 | 7 个 |
+| MCP 工具 | 9 个（4 RAG + 5 Action） |
+| LangGraph 节点 | 8 个 |
 | Pytest 单元测试 | 14 个（10 纯单元 + 4 集成） |
 | 评测数据 | RAG 100 条（8 类别）+ AI 标注 Recall + RAGAS 24 条（分层抽样） |
 | Docker 容器 | 4 个（API + Redis + Prometheus + Grafana） |
@@ -25,6 +25,7 @@
 | 组件 | 技术 | 选型理由 | 是否测试 | 测试数据 | 不足之处 |
 |------|------|---------|---------|---------|---------|
 | LLM | qwen-plus (DashScope) | 中文最优/成本 GPT-4o 的 1/20/延迟 ~1s | ✓ CoT 路由实测 | 20 条，CoT 90% vs 规则 85% | with_structured_output 不稳定→手动 JSON 提取 |
+| 视觉 LLM | qwen-vl-plus (DashScope) | 同 API Key 零接入成本/OpenAI Vision 兼容/中文食物识别 | △ 功能验证 | 餐食识别+冰箱食材识别两种 prompt | 分量估算依赖 LLM 视觉判断，无专用分类器 |
 | Embedding | BGE-large-zh-v1.5 (本地) | 中文 MTEB 最高/1024 维/本地免费 | ✓ RAG 评测 | 100 条，Recall@3=88% | 不支持 Sparse，需额外 BM25 |
 | Reranker | BGE-Reranker-v2-m3 (本地) | CrossEncoder 精度 > Bi-Encoder | ✓ RAG 评测 | Context Precision 0.667 | 单线程慢(~12s/query)，考虑 ONNX 量化 |
 | Sparse Retrieval | BM25 (Qdrant/bm25) | 精确关键词匹配，和 Dense 互补 | ✓ RAG 评测 | Hybrid > Dense-only (Recall +5%) | 下载需 HF 网络，离线用补丁跳过 |
@@ -45,7 +46,7 @@
 | Prompt 注入防御 | Preprocess 正则 + System Prompt 加固 | 10 个注入模式 → FINISH, 3 个 prompt 加固 | ✓ 14 个 pytest 通过 | 注入检测在路由前拦截 | 对抗性 prompt 未充分测试 |
 | JWT 认证 | auth.py + api/mcp 接线 | token 签发/验证/强制覆盖 user_id | ✓ 14 个 pytest 通过 | 3 个工具强制使用认证 user_id | 开发阶段无 OAuth, JWT_SECRET 默认值不安全 |
 | 全链路降级 | 7 组件 graceful fallback | Redis/BGE/BM25/Reranker/LLM/SQLite/Qdrant | △ 部分测试 | LLM fallback FINISH, Redis 跳过限流 | Qdrant/MCP 子进程/语料文件缺失未覆盖 |
-| 前端 | Next.js 14 + Tailwind + SSE | Solarpunk 风格/流式对话/Agent 状态 | ✗ 未测试 | — | 无 E2E 测试，sidebar 数据未和后端打通 |
+| 前端 | Next.js 14 + Tailwind + SSE | Solarpunk 风格/流式对话/Agent 状态/图片上传拍照 | ✗ 未测试 | — | 无 E2E 测试，sidebar 数据未和后端打通 |
 | 部署 | Docker + compose | 一键 4 容器/模型挂载 | △ 构建通过 | 镜像 ~8GB | 国内网络下载慢，需 torch CPU 版优化 |
 | 监控 | Prometheus + Grafana | 四层指标 (HTTP/Node/RAG/LLM) | ✓ metrics 端点 | docker compose up 后 localhost:9090/3000 | 无 Grafana dashboard JSON 预配置 |
 
@@ -123,23 +124,69 @@
 | 17 | Chunk 溯源 + 增量更新 | 无 section_id 标记 | 无 | 94 chunks×41 sections 标记, Reflection 溯源检查 | ✅ |
 | 18 | MCP 健康监控 | 子进程崩溃无法恢复 | 无 | 30s 心跳 ping + 自动重启+重建图 | ✅ |
 | 19 | 语料热更新 | 改文件需重启 | 手动重索引 | mtime 检测→hash diff→增量重索引 | ✅ |
+| 20 | 多模态视觉能力 | 仅文本对话，无法识别食物照片 | — | vision_expert 节点(qwen-vl-plus) + 前端拍照上传 + generate_recipe MCP 工具, 节点 7→8, 工具 8→9 | ✅ |
 
 ---
 
-## 5. 已知不足（诚实版）
+## 5. 多模态功能详情
+
+### 5.1 架构变更
+
+新增 **vision_expert** 节点（第 8 个节点）和 **generate_recipe** MCP 工具（第 9 个工具），扩展 Supervisor 路由支持图片检测。
+
+```
+START → preprocess → supervisor ─┬→ rag_expert → rag_reflection → END
+                                  ├→ action_expert → memory_compressor → supervisor/END
+                                  ├→ slot_filler → END
+                                  ├→ vision_expert → supervisor  (NEW)
+                                  └→ FINISH → END
+```
+
+### 5.2 两个核心场景
+
+**场景 A — 拍照记食**：用户拍餐食照片 → vision_expert(qwen-vl-plus) 识别食物+估算分量 → 置信度低时 slot_filler 追问 → action_expert 调用 log_user_meal 自动记录
+
+**场景 B — 冰箱食谱**：用户拍冰箱照片 → vision_expert 识别食材列表 → supervisor 路由 action_expert → 调用 generate_recipe 工具（查 SQLite 营养 + RAG 禁忌 + 热量计算 → 返回食谱生成指令）→ action_expert LLM 创意合成最终食谱
+
+### 5.3 视觉模型选型
+
+| 方案 | 单次成本 | 接入难度 | 食物识别 | 对话能力 |
+|------|---------|---------|---------|---------|
+| **qwen-vl-plus** (选用) | ~￥0.003 | 零（同 DashScope API Key） | 通用 VL，中文食物识别好 | 原生多轮对话 |
+| qwen-vl-max | ~￥0.006 | 零 | 更强（小字/复杂摆盘） | 同上 |
+| 百度菜品识别 API | ~￥0.001 | 中（新 SDK+新 Key） | 专用分类器，更准 | 无（仅返回标签） |
+
+**选 qwen-vl-plus 理由**：项目已用 DashScope qwen-plus，同一 base_url/API Key，仅改 model name + 构造 multimodal message（OpenAI Vision 兼容格式）。图片在前端压缩到 1024px JPEG Q=0.7（~100KB），转为 base64 后经 SSE 流式传输。
+
+### 5.4 generate_recipe 工具设计
+
+**三层协作模型**：工具负责数据聚合（查 SQLite 营养 + RAG 禁忌 + 热量计算），LLM 负责创意合成（设计菜品、烹饪方法、热量标注）。
+
+工具返回的是**自然语言食谱生成指令**（含食材营养档案、用户健康约束、禁忌过滤、RAG 饮食指南、8 条生成要求），而非 JSON。action_expert 的 LLM 接收指令后合成最终食谱文本。这样 MCP 工具保持 LLM-free，符合现有架构分层。
+
+### 5.5 前端适配
+
+- `chat-input.tsx`：新增 Camera 按钮 + `<input type="file" accept="image/*" capture="environment">` + Ctrl+V 粘贴图片 + 缩略图预览
+- `lib/utils.ts`：`compressImage()` 客户端图片压缩（1024px + JPEG Q=0.7）
+- `use-sse.ts`：`sendMessage` 支持 `imageBase64` 参数，POST body 携带 `image_base64`
+- `message-bubble.tsx`：用户消息中渲染图片缩略图
+- `agent-status.tsx`：新增 `vision_expert: "图像分析"` 状态映射
+
+---
+
+## 6. 已知不足（诚实版）
 
 | 优先级 | 缺口 | 当前状态 | 计划 |
 |--------|------|---------|------|
-| P1 | 语料更新无闭环 | 65K 静态文件，手动编辑 | Hash 增量更新 + admin API |
-| P1 | MCP 子进程无健康监控 | 崩溃后无法自动恢复 | 加 health monitor + 自动重启 |
 | P1 | 前端无 E2E 测试 | 手动测试 | Cypress/Playwright |
+| P1 | 视觉分量估算精度 | VL 模型估算食物克数置信度不稳定 | 多角度拍照 + 参照物对比 prompt |
 | P2 | 无隐私加密/SQLite 明文 | 开发阶段 | AES + PII 过滤 + GDPR API |
 | P2 | JWT_SECRET 默认值 | 开发阶段不安全 | 环境变量注入 |
 | P3 | 无跨用户 A/B 测试 | — | 多版本 graph 并行对比 |
 
 ---
 
-## 6. 项目运行方式
+## 7. 项目运行方式
 
 ```bash
 # 本地开发

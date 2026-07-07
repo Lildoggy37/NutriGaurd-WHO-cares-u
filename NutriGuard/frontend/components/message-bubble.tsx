@@ -54,6 +54,14 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
               : "bg-white/80 border border-leaf-200/50 text-leaf-900 rounded-bl-lg shadow-sm"
           } ${isStreaming && !isUser ? "streaming-cursor" : ""}`}
         >
+          {/* User image preview */}
+          {isUser && message.imageBase64 && (
+            <img
+              src={`data:image/jpeg;base64,${message.imageBase64}`}
+              alt="上传的图片"
+              className="mb-2 max-h-48 rounded-xl object-cover w-full"
+            />
+          )}
           <div className="whitespace-pre-wrap break-words">
             {message.content || (isStreaming ? "" : "...")}
           </div>
