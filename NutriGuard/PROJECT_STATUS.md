@@ -41,6 +41,8 @@
 | Chunking | 512ch+128ov+元数据注入 | 固定大小/防截断/章节感知 | ✓ RAGAS | Precision 0.40→0.667 (+67%) | 语料继续扩充后需 parent-child 策略 |
 | Token 追踪 | llm_token_total Counter | 输入/输出按节点统计 | ✓ func test | 6 个节点埋点 | 工具内 LLM 调用未纳入 |
 | Harness | NodeHarness+ToolHarness+LLMRateLimiter | 重试/超时/熔断/并发控制 | ✓ 14 个 pytest 通过 | retry×2, timeout10-60s, QPS10+并发5 | 429 限流未特殊处理退避 |
+| Prompt 注入防御 | Preprocess 正则 + System Prompt 加固 | 10 个注入模式 → FINISH, 3 个 prompt 加固 | ✓ 14 个 pytest 通过 | 注入检测在路由前拦截 | 对抗性 prompt 未充分测试 |
+| JWT 认证 | auth.py + api/mcp 接线 | token 签发/验证/强制覆盖 user_id | ✓ 14 个 pytest 通过 | 3 个工具强制使用认证 user_id | 开发阶段无 OAuth, JWT_SECRET 默认值不安全 |
 | 全链路降级 | 7 组件 graceful fallback | Redis/BGE/BM25/Reranker/LLM/SQLite/Qdrant | △ 部分测试 | LLM fallback FINISH, Redis 跳过限流 | Qdrant/MCP 子进程/语料文件缺失未覆盖 |
 | 前端 | Next.js 14 + Tailwind + SSE | Solarpunk 风格/流式对话/Agent 状态 | ✗ 未测试 | — | 无 E2E 测试，sidebar 数据未和后端打通 |
 | 部署 | Docker + compose | 一键 4 容器/模型挂载 | △ 构建通过 | 镜像 ~8GB | 国内网络下载慢，需 torch CPU 版优化 |

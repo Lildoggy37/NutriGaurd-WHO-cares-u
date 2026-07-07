@@ -31,6 +31,7 @@ from mcp.client.stdio import stdio_client
 from langchain_mcp_adapters.tools import load_mcp_tools
 from graph_brain import build_multi_agent_graph
 from memory import MemoryHarness
+from auth import extract_user_id, AuthContext, create_token
 
 # ==========================================
 #   1 lifespan
@@ -151,6 +152,20 @@ async def metrics_endpoint():
     return Response(content=get_metrics(), media_type="text/plain")
 
 # ==========================================
+#   Auth: JWT token 端点
+# ==========================================
+from pydantic import BaseModel as PydanticBase
+
+class AuthRequest(PydanticBase):
+    user_id: str
+
+@app.post("/auth/token")
+async def get_token(req: AuthRequest):
+    """生成 JWT token (开发阶段, 生产需加密码/oauth)"""
+    token = create_token(req.user_id)
+    return {"token": token, "user_id": req.user_id}
+
+# ==========================================
 #   2. Redis 滑动窗口，限流防爆
 # ==========================================
 async def sliding_window_rate_limiter(request:Request):
@@ -236,10 +251,14 @@ async def chat_stream_endpoint(request: ChatRequest):
             detail="服务正在初始化中，请稍后重试。若持续出现此错误，请检查 API Key 配置。",
         )
 
+    # 认证: 提取真实 user_id, 拒绝前端传入的伪造 session_id
+    auth_user_id = extract_user_id(request)
+    AuthContext.set_current_user(auth_user_id)
+
     async def event_generator() -> AsyncGenerator[str, None]:
         initial_state = {
             "messages": [HumanMessage(content=request.query)],
-            "user_profile": {"用户标识": request.session_id},
+            "user_profile": {"用户标识": auth_user_id},
             "next_node": "",
         }
         config = {"configurable": {"thread_id": request.session_id}}

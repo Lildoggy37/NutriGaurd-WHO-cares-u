@@ -47,6 +47,7 @@ from monitoring import (
     rag_search_duration, rag_engine_ready,
 )
 from harness import tool_harness
+from auth import enforce_user_id
 
 # ============================
 #   1. 构建MCP Redis  本地向量模型
@@ -518,6 +519,8 @@ async def update_health_profile(
     更新用户的健康画像（身高、体重、年龄、性别、活动水平、疾病）。
     用户提到个人信息时调用此工具记录，仅传入已知的参数。
     """
+    user_id = user_id or "anonymous"  # update_health_profile 的 user_id 可选
+    user_id = enforce_user_id(user_id)
     print(f" [MCP 行动] 更新健康画像 | 用户:{user_id}", file=sys.stderr)
 
     try:
@@ -555,12 +558,13 @@ async def log_user_meal(user_id: str, meal_type: str, food_items: str) -> str:
     """
     记录用户的实际饮食（如早餐、午餐）。
     必须参数:
-      - user_id: 用户唯一ID
+      - user_id: 用户唯一ID (由认证系统强制覆盖，不接受用户输入)
       - meal_type: 餐次类型（早餐/午餐/晚餐/加餐）
       - food_items: 食物描述，例如 '2个包子,1杯牛奶'、'鸡胸肉:200g,西兰花:300g'
 
     工具会自动匹配食物营养数据库并计算热量。
     """
+    user_id = enforce_user_id(user_id)
     print(f" [MCP 行动] 正在写入饮食日志 | 用户:{user_id} | {meal_type}: {food_items}", file=sys.stderr)
 
     items = _parse_food_items(food_items)
@@ -596,6 +600,7 @@ async def calculate_daily_calories(user_id: str) -> str:
     会根据用户健康画像（身高、体重、年龄、性别、疾病）动态计算目标值。
     如果用户画像不存在，先提示用户补充基本信息。
     """
+    user_id = enforce_user_id(user_id)
     print(f" [MCP 行动] 正在核算今日卡路里 | 用户:{user_id}", file=sys.stderr)
 
     # 1. 获取健康画像 → 计算个性化目标
