@@ -10,7 +10,7 @@
 |------|------|
 | Python 代码 | ~6,200 行（含测试） |
 | 前端 Next.js | ~550 行（chat-input/viewport/sidebar/components） |
-| RAG 语料 | **65K 字符**，9 章 51 节，80+ chunk |
+| RAG 语料 | **3.5M 字符**，17,749 chunks，12,218 sections（GitHub + HuggingFace 开源数据集导入） |
 | 食物数据库 | 41 种，10 类（SQLite） |
 | MCP 工具 | 9 个（4 RAG + 5 Action） |
 | LangGraph 节点 | 8 个 |
@@ -29,7 +29,7 @@
 | Embedding | BGE-large-zh-v1.5 (本地) | 中文 MTEB 最高/1024 维/本地免费 | ✓ RAG 评测 | 100 条，Recall@3=88% | 不支持 Sparse，需额外 BM25 |
 | Reranker | BGE-Reranker-v2-m3 (本地) | CrossEncoder 精度 > Bi-Encoder | ✓ RAG 评测 | Context Precision 0.667 | 单线程慢(~12s/query)，考虑 ONNX 量化 |
 | Sparse Retrieval | BM25 (Qdrant/bm25) | 精确关键词匹配，和 Dense 互补 | ✓ RAG 评测 | Hybrid > Dense-only (Recall +5%) | 下载需 HF 网络，离线用补丁跳过 |
-| Vector DB | Qdrant (磁盘模式) | Hybrid Search 原生支持/零配置 | ✓ RAG 评测 | 80+ chunk 索引 ~800KB, 路径 `data/qdrant_storage` | ✅ 已持久化 |
+| Vector DB | Qdrant (磁盘模式) | Hybrid Search 原生支持/零配置 | △ 待重新评测 | **17,749 chunks, 209.3 MB**, 路径 `data/qdrant_storage` | 索引耗时 80 分钟(单线程 BGE) |
 | 语义缓存 | Redis Stack | KNN 向量搜索/24h TTL | △ 功能验证 | 命中 <50ms, 加速 75x | 标准 Redis 不支持，需自动检测降级 |
 | 限流 | Redis 滑动窗口 | Sorted Set 原子操作 | ✓ 功能验证 | 60req/60s/IP | 仅 IP 维度，无用户级限流 |
 | 健康画像 | SQLite | 零配置/字段级增量更新 | ✓ func test | 6 字段，41 种食物关联 | 未传字段存 NULL→已修了 or 默认值 bug |
@@ -39,7 +39,7 @@
 | 工具协议 | MCP (stdio) + 健康监控 | 自动工具发现/零网络延迟/30s 心跳+自动重启 | ✓ 14 个 pytest | 8 个工具按职能隔离, 崩溃自动恢复 | ✅ health monitor 已加 |
 | 合规审查 | Reflection 节点 | 幻觉/安全/完整性+用户数据一致性校验 | ✓ RAGAS Faithfulness 0.854 | 24 条分层抽样 | ✅ 已加身高/体重/年龄交叉校验 |
 | 意图预处理 | Preprocess 节点 | 纠错/同义词展开/指代消解 | ✓ prompt 检查 | 9/9 规则完整 | ≤10 字跳过，长查询改写质量依赖 LLM |
-| Chunking | 512ch+128ov+metadata+section_id+SHA256 | 固定大小/防截断/章节感知/溯源 | ✓ RAGAS | 94 chunks, 41 sections | ✅ |
+| Chunking | 512ch+128ov+metadata+section_id+SHA256 | 固定大小/防截断/章节感知/溯源 | ✓ RAGAS | **17,749 chunks, 12,218 sections** | ✅ |
 | 语料热更新 | mtime 检测 + SHA256 diff | 文件修改→自动增量重索引, 无 Admin API | ✓ func test | 只重索引变更 section | ✅ |
 | Token 追踪 | llm_token_total Counter | 输入/输出按节点统计 | ✓ func test | 6 个节点埋点 | 工具内 LLM 调用未纳入 |
 | Harness | NodeHarness+ToolHarness+LLMRateLimiter | 重试/超时/熔断/并发控制 | ✓ 14 个 pytest 通过 | retry×2, timeout10-60s, QPS10+并发5 | 429 限流未特殊处理退避 |
@@ -77,14 +77,14 @@
 
 **从 100 条 v2 数据集中按 8 类别分层抽样 24 条**，纯 LLM 实现不依赖 ragas 库。
 
-| 指标 | 24 条(新) | 5 条(旧) | 变化 |
+| 指标 | 24 条(v3 新语料) | 24 条(v2 旧语料) | 变化 |
 |------|----------|---------|------|
-| **Faithfulness** | **0.854** | 1.000 | -0.146 (更真实, 不再"太假") |
-| **Answer Relevancy** | **0.511** | 0.660 | -0.149 |
-| **Context Precision** | **0.458** | 0.667 | -0.209 |
-| **Context Recall** | **0.654** | 0.733 | -0.079 |
+| **Faithfulness** | **1.000** | 0.854 | **+0.146** (语料240x+Top-5+"不猜测"prompt) |
+| **Answer Relevancy** | **0.622** | 0.511 | +0.111 (+22%) |
+| **Context Precision** | **0.508** | 0.458 | +0.050 (+11%) |
+| **Context Recall** | **0.735** | 0.654 | +0.081 (+12%) |
 
-**方法**：LLM-as-judge（qwen-plus 裁判），每条查询 3-4 次 LLM 裁判调用（Faithfulness/Relevancy/Precision/Recall）。Faithfulness 经历过一轮修复——初版 prompt 导致 JSON 解析失败，改 prompt + 加 retry 后稳定。24 条分层抽样比 5 条手选更真实——暴露了语料新扩充疾病的覆盖差距。
+**方法**：LLM-as-judge（qwen-plus 裁判），每条查询 3-4 次 LLM 裁判调用。评测配置更新：Retriever k=20, Reranker Top-5, 生成 prompt 加固"证据不足时不猜测"。Faithfulness 达到 1.000 说明 24 条回答中的所有声明都有检索证据支撑——语料 240x 扩展 + Top-5 证据池 + "不猜测"prompt 三重加固生效。
 
 ### 3.3 其他评测
 
@@ -125,6 +125,49 @@
 | 18 | MCP 健康监控 | 子进程崩溃无法恢复 | 无 | 30s 心跳 ping + 自动重启+重建图 | ✅ |
 | 19 | 语料热更新 | 改文件需重启 | 手动重索引 | mtime 检测→hash diff→增量重索引 | ✅ |
 | 20 | 多模态视觉能力 | 仅文本对话，无法识别食物照片 | — | vision_expert 节点(qwen-vl-plus) + 前端拍照上传 + generate_recipe MCP 工具, 节点 7→8, 工具 8→9 | ✅ |
+| 21 | 语料大规模扩充 | 74 chunks 撑不起 RAG 必要性(仅占 21% 上下文) | 74 chunks, 28K 字符, Qdrant 800KB | **17,749 chunks, 3.5M 字符, Qdrant 209MB** | **+240x** — RAG 成为刚需 |
+| 22 | RAG 检索参数调优 + RAGAS 重测 | Faithfulness 0.854 在医疗场景偏低 | Retriever k=10, Top-3, Faithfulness=0.854 | **Retriever k=20, Top-5, Faithfulness=1.000, 四项指标全面上升** | Faithfulness +17%, 全维提升 |
+
+---
+
+## 4a. 语料扩充详情（阶段 21）
+
+### 扩充策略
+
+原始语料仅 **74 chunks / 28K 字符**，占 qwen-plus 131K 上下文窗口的 21%——理论上可以直接塞进 system prompt，RAG 检索形同虚设。
+
+采用 **"开源数据集导入"** 策略，零 API 消耗，从 GitHub + HuggingFace 下载 8 个中文营养/医疗数据集，转写为 markdown 后追加到 mock_corpus.md。
+
+### 数据源
+
+| # | 数据源 | 平台 | 条目数 | 贡献 chunks | 内容 |
+|---|--------|------|--------|------------|------|
+| 1 | Sanotsu/china-food-composition-data | GitHub | 1,091 | ~194 | 中国食物成分表第6版, 30+营养素 + GI |
+| 2 | PanruifengWawa/food-material | GitHub | 3,092 | ~338 | 食材食疗属性、性味归经、适宜体质 |
+| 3 | FreedomIntelligence/DoctorFLAN | HF | 2,000 | ~2,086 | 数十种疾病的中文饮食指导+禁忌 |
+| 4 | FreedomIntelligence/huatuo_encyclopedia_qa | HF | 800 | ~1,397 | 复旦高质量中文医疗百科问答 |
+| 5 | AIR-Bench/qa_healthcare_zh | HF | 212 | ~20 | 中文医疗健康饮食问答 |
+| 6 | SeaEval/cmmlu | HF | 11,582 | ~4,137 | 中文学术题库(含营养学/解剖学) |
+| 7 | Codatta/MM-Food-100K | HF | 3,000 | ~791 | 中餐菜品+食材+营养成分JSON |
+| 8 | madroid/nt-19 | HF | — | — | 中国包装食品营养(字段不匹配,待修复) |
+
+### 效果对比
+
+| 维度 | 扩充前 | 扩充后 | 倍数 |
+|------|--------|--------|------|
+| 字符数 | 28,667 | **3,470,549** | 121x |
+| Chunk 数 | 74 | **17,749** | 240x |
+| Section 数 | 39 | **12,218** | 313x |
+| Qdrant 存储 | ~800KB | **209.3 MB** | 267x |
+| 占 131K 上下文 | 21% | **2,650%** | 塞不进 |
+
+**核心结论**：RAG 检索从"花架子"变成**刚需**——3.5M 字符不可能塞进任何 LLM 上下文窗口，Hybrid Search + Reranker 的价值现在可以真正体现。
+
+### 相关脚本
+
+- `import_datasets.py` — 数据源下载与 markdown 转写（GitHub clone + HF datasets）
+- `rebuild_index.py` — Qdrant 索引重建（17,749 chunks, BGE + BM25, 耗时 80 分钟）
+- `expand_corpus.py` — DeepSeek LLM 批量生成（备用, 额度未消耗）
 
 ---
 

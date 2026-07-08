@@ -131,7 +131,7 @@ async def _init_rag_engine_async():
             collection_name="nutriguard_collection",
             retrieval_mode="hybrid",
         )
-        _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
+        _retriever = _vectorstore.as_retriever(search_kwargs={"k": 20})
         print(f"  [RAG-init] Qdrant 混合索引构建完成 ({time.time()-t4:.1f}s)", file=sys.stderr)
 
         t5 = time.time()
@@ -201,7 +201,7 @@ async def _reload_corpus_if_changed():
             updated += 1
 
         _corpus_mtime = current_mtime
-        _retriever = _vectorstore.as_retriever(search_kwargs={"k": 10})
+        _retriever = _vectorstore.as_retriever(search_kwargs={"k": 20})
         print(f"[RAG-reload] 完成: {updated}/{len(new_hashes)} 个 section 已更新 ({time.time()-t0:.1f}s)", file=sys.stderr)
     except Exception as e:
         print(f"[RAG-reload] 增量更新失败: {e}, 保留旧索引", file=sys.stderr)
@@ -212,7 +212,7 @@ init_db()
 print("[MCP Server] SQLite 数据库就绪（RAG 引擎将在首次查询时延迟加载）", file=sys.stderr)
 
 
-async def perform_rag_search(query: str, top_k: int = 3) -> str:
+async def perform_rag_search(query: str, top_k: int = 5) -> str:
     """
     内部RAG检索引擎：双路召回 + Reranker 精排（CPU 密集操作放入线程池）。
     首次调用会触发 RAG 引擎的异步延迟初始化。
