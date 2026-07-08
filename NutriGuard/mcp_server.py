@@ -121,11 +121,13 @@ async def _init_rag_engine_async():
         print(f"  [RAG-init] 分块完成: {len(docs)} 块, {len(section_hashes)} 章节 (section_id+hash) ({time.time()-t3:.1f}s)", file=sys.stderr)
 
         t4 = time.time()
+        qdrant_path = os.path.join(BASE_DIR, "data", "qdrant_storage")
+        os.makedirs(qdrant_path, exist_ok=True)
         _vectorstore = QdrantVectorStore.from_documents(
             docs,
             embedding=_embedder,
             sparse_embedding=sparse_embeddings,
-            location=os.path.join(BASE_DIR, "data", "qdrant_storage"),
+            path=qdrant_path,
             collection_name="nutriguard_collection",
             retrieval_mode="hybrid",
         )
